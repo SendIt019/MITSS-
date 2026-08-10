@@ -168,3 +168,87 @@ Bars are now assigned to lanes by greedy interval partitioning and the row grows
 to fit, so concurrent work is stacked and visible. Resource-level errors such as
 over-capacity also mark the row label, since they implicate the row rather than
 any one bar. Verified by measuring rendered geometry in a browser, not by eye.
+
+## 2026-08-10 16:10 EDT — REVERSAL: this is a prompt pipeline, not a scheduling tool
+
+The domain question was answered "no preference" early on, and I read that as
+"pick something reasonable and stay generic." I built a scheduling application
+instead: a scheduling data model, a scheduling grammar, a constraint engine,
+and a Gantt interface. That was the wrong abstraction at the wrong level.
+
+What it actually is: a prompt goes in, hits the harness, an output comes out.
+The harness renders the exact prompt, captures the exact output, and records
+provenance. Everything scheduling-shaped was a domain sitting on top of a much
+smaller idea.
+
+Reversed. The generic pipeline is now the product, in `backend/pipeline/`.
+Reused from the previous build: run storage and the append-only index, the
+provider harness, output capture, the API and interface shell. Discarded from
+the product (kept as an example): the scheduling model, grammar, constraints,
+renderers.
+
+Lesson for future sessions: "no preference" about a domain meant the domain
+should not have existed, not that I should choose one.
+
+## 2026-08-10 16:12 EDT — Capture only: the harness does not judge output
+
+Explicit decision: no schema validation, no assertions, no automated checking
+of what the model returns. The operator reads the output and decides.
+
+This is a real constraint on the design, not an omission. It means the value of
+the tool is entirely in organisation, provenance and comparison, so those are
+where the effort goes.
+
+## 2026-08-10 16:13 EDT — Verdicts: capturing the operator's judgement
+
+Since accuracy is assessed by reading, each recorded output carries a verdict
+(unrated, accurate, partly right, inaccurate) and a free-text note.
+
+Rationale: with no automated checking, an unrecorded reading is lost the moment
+the tab closes, and a version-by-model matrix would have nothing to display.
+`unrated` is the default and is deliberately distinct from `accurate`, so
+"not looked at yet" never masquerades as "checked and fine".
+
+A cell in the matrix shows the worst verdict among its runs. A model that got
+something wrong once is worth surfacing even if a later attempt passed.
+
+## 2026-08-10 16:14 EDT — Prompt versions are immutable
+
+Editing a prompt never overwrites. Saving writes the next version; runs freeze
+the prompt text into their own folder at record time.
+
+Rationale: the entire point of comparing across versions is that the older
+result still reflects the older prompt. Mutable prompts would silently
+invalidate every historical run. Saving text identical to the current version
+is refused rather than creating a version that means nothing.
+
+## 2026-08-10 16:16 EDT — Word-level diffing, not line-level
+
+Output comparison uses difflib at word granularity with punctuation attached to
+its word. A line diff on model prose reports a reworded sentence as one line
+removed and one line added, which communicates nothing about what changed.
+
+Consequence to be aware of: `passage.` becoming `passage briefly.` counts as
+one token replaced by two, so raw added/removed counts read slightly high. The
+rendering is what matters and it is exact — concatenating either side's spans
+reproduces that side character-for-character, which is asserted in a test.
+
+Diff highlighting carries a second channel — strikethrough for removed,
+underline for added — so it does not depend on colour.
+
+## 2026-08-10 16:18 EDT — Fixed: event log ordered a version before its prompt
+
+`create_prompt` wrote the first version before logging the prompt's creation,
+so the append-only index showed `version_added` for a prompt that did not
+appear to exist yet. Creation is now logged first. Caught by a test asserting
+the first event of a fresh store.
+
+## 2026-08-10 16:20 EDT — Scheduling kept as a worked example
+
+The scheduling package and its full test suite stay at `backend/mitss/`, with
+`backend/examples/seed_scheduling.py` loading its generated packet into the
+prompt library as a starting prompt.
+
+Rationale: it is a good illustration of a heavily specified prompt, and it
+still holds the provider harness that the pipeline imports. It is documented as
+an example so nobody mistakes it for the product again.

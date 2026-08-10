@@ -1,49 +1,50 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from './api'
-import Timeline from './components/Timeline'
+import DiffText, { DiffLegend } from './components/DiffText'
+import Matrix from './components/Matrix'
 import {
-  Card, CopyButton, Dropzone, Issues, ScheduleTable, Steps, Tiles,
+  Card, CopyButton, Dropzone, Empty, Field, Stat, Tabs, Verdict, VerdictPicker,
+  timeAgo, verdictMeta,
 } from './components/Panels'
 
-const SAMPLE = `SESSION: demo-001
-DOMAIN: field-ops
-HORIZON: 2026-08-11 08:00 -> 18:00
-GRID: 15min
-OBJECTIVE: finish as early as possible
+const SAMPLE = `You are extracting structured facts from an incident report.
 
-RESOURCE: alpha | Team Alpha | cap 1
-RESOURCE: bravo | Team Bravo | cap 2
+Read the report below and return, for each distinct event:
+  - what happened, in one sentence
+  - when it happened
+  - which system was affected
+  - whether it was resolved
 
-TASK: t1 | Site survey     | 120min
-TASK: t2 | Equipment setup | 1h30m | after t1
-TASK: t3 | Calibration     | 1h    | after t2 | needs alpha | by 16:00
-TASK: t4 | Teardown        | 45min | after t3`
+Return the events in the order they occurred. If a detail is not stated
+in the report, write "not stated" rather than inferring it.
+
+REPORT:
+{paste the report here}`
 
 export default function App() {
-  const [run, setRun] = useState(null)        // current run payload
+  const [prompts, setPrompts] = useState([])
+  const [prompt, setPrompt] = useState(null)
+  const [draft, setDraft] = useState('')
+  const [versionNote, setVersionNote] = useState('')
+  const [viewVersion, setViewVersion] = useState(null)
+
   const [runs, setRuns] = useState([])
+  const [matrix, setMatrix] = useState(null)
+  const [openRun, setOpenRun] = useState(null)
+
+  const [outputText, setOutputText] = useState('')
+  const [modelName, setModelName] = useState('')
+  const [runNotes, setRunNotes] = useState('')
+
+  const [compareA, setCompareA] = useState('')
+  const [compareB, setCompareB] = useState('')
+  const [comparison, setComparison] = useState(null)
+
+  const [tab, setTab] = useState('prompt')
   const [llm, setLlm] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [planReply, setPlanReply] = useState('')
-  const [scheduleReply, setScheduleReply] = useState('')
-  const [modelName, setModelName] = useState('')
-  const [note, setNote] = useState('')
-
-  const refreshRuns = useCallback(async () => {
-    try {
-      const body = await api.runs()
-      setRuns(body.runs)
-    } catch {
-      // The run list is supporting information; a failure here should not
-      // interrupt whatever the operator is doing.
-    }
-  }, [])
-
-  useEffect(() => {
-    api.llm().then(setLlm).catch(() => setLlm(null))
-    refreshRuns()
-  }, [refreshRuns])
+  const [flash, setFlash] = useState('')
 
   const guard = async (work) => {
     setBusy(true)
@@ -55,253 +56,550 @@ export default function App() {
       return null
     } finally {
       setBusy(false)
-      refreshRuns()
     }
   }
 
-  const onFile = (file) =>
+  const say = (message) => {
+    setFlash(message)
+    setTimeout(() => setFlash(''), 2500)
+  }
+
+  const refreshPrompts = useCallback(async () => {
+    const body = await api.prompts().catch(() => null)
+    if (body) setPrompts(body.prompts)
+  }, [])
+
+  useEffect(() => {
+    api.llm().then(setLlm).catch(() => setLlm(null))
+    refreshPrompts()
+  }, [refreshPrompts])
+
+  const loadPrompt = useCallback(async (id, version) => {
+    const detail = await api.prompt(id, version)
+    setPrompt(detail)
+    setDraft(detail.selected_version?.text || '')
+    setViewVersion(detail.selected_version?.version ?? null)
+    setVersionNote('')
+
+    const [runsBody, grid] = await Promise.all([
+      api.runs(id).catch(() => ({ runs: [] })),
+      api.matrix(id).catch(() => null),
+    ])
+    setRuns(runsBody.runs)
+    setMatrix(grid)
+    setOpenRun(null)
+    setComparison(null)
+    setCompareA('')
+    setCompareB('')
+    return detail
+  }, [])
+
+  const refreshCurrent = useCallback(async () => {
+    if (prompt) await loadPrompt(prompt.id, viewVersion || undefined)
+  }, [prompt, viewVersion, loadPrompt])
+
+  // -- prompt actions --------------------------------------------------
+
+  const onNewPrompt = () =>
     guard(async () => {
-      const body = await api.upload(file)
-      setRun(body)
-      setPlanReply('')
-      setScheduleReply('')
-      return body
+      const created = await api.createPrompt('Untitled prompt', SAMPLE, 'starting point')
+      await refreshPrompts()
+      await loadPrompt(created.id)
+      setTab('prompt')
+      say('New prompt created')
     })
 
-  const onSample = () =>
-    onFile(new File([SAMPLE], 'demo-001.txt', { type: 'text/plain' }))
-
-  const onAttachPlan = () =>
+  const onUpload = (file, intoCurrent) =>
     guard(async () => {
-      const body = await api.attachPlan(run.run_id, planReply)
-      setRun((previous) => ({ ...previous, ...body }))
-      return body
+      const body = await api.upload(file, intoCurrent && prompt ? prompt.id : '')
+      await refreshPrompts()
+      await loadPrompt(body.id)
+      setTab('prompt')
+      say(intoCurrent ? 'Saved as a new version' : 'Prompt created from file')
     })
 
-  const onIngest = () =>
+  const onSaveVersion = () =>
     guard(async () => {
-      const body = await api.ingest(run.run_id, scheduleReply, modelName, note)
-      setRun((previous) => ({ ...previous, ...body }))
-      return body
+      await api.addVersion(prompt.id, draft, versionNote)
+      await refreshPrompts()
+      await loadPrompt(prompt.id)
+      say('New version saved')
+    })
+
+  const onRename = (name) =>
+    guard(async () => {
+      await api.renamePrompt(prompt.id, name)
+      await refreshPrompts()
+      await loadPrompt(prompt.id, viewVersion || undefined)
+    })
+
+  // -- run actions -----------------------------------------------------
+
+  const onRecord = () =>
+    guard(async () => {
+      const run = await api.recordRun({
+        prompt_id: prompt.id,
+        version: viewVersion,
+        model: modelName,
+        output: outputText,
+        notes: runNotes,
+        verdict: 'unrated',
+      })
+      setOutputText('')
+      setRunNotes('')
+      await refreshCurrent()
+      setOpenRun(run)
+      setTab('runs')
+      say('Output recorded — read it and set a verdict')
+    })
+
+  const onReview = (runId, verdict, notes) =>
+    guard(async () => {
+      const updated = await api.review(runId, verdict, notes)
+      setOpenRun(updated)
+      const [runsBody, grid] = await Promise.all([
+        api.runs(prompt.id), api.matrix(prompt.id),
+      ])
+      setRuns(runsBody.runs)
+      setMatrix(grid)
     })
 
   const onOpenRun = (runId) =>
     guard(async () => {
-      const body = await api.run(runId)
-      setRun(body)
-      setModelName(body.model || '')
-      setNote(body.note || '')
-      setScheduleReply('')
-      setPlanReply('')
-      return body
+      const run = await api.run(runId)
+      setOpenRun(run)
+      setTab('runs')
     })
 
-  // Which tasks carry an error or a warning, so the timeline and table can mark
-  // them. Derived from the issue list rather than recomputed on the client.
-  const { flaggedTasks, warnedTasks, flaggedResources } = useMemo(() => {
-    const flagged = new Set()
-    const warned = new Set()
-    // Some errors belong to a resource rather than one task — an over-capacity
-    // clash implicates every bar in the row, so the row carries the mark.
-    const resources = new Map()
+  const onDeleteRun = (runId) =>
+    guard(async () => {
+      await api.deleteRun(runId)
+      setOpenRun(null)
+      await refreshCurrent()
+      say('Run deleted — it stays in the activity log')
+    })
 
-    for (const issue of run?.issues || []) {
-      const where = issue.where || ''
-      const resourceMatch = /^resource:(\S+)/.exec(where)
-      if (resourceMatch) {
-        if (issue.severity === 'error') {
-          const id = resourceMatch[1]
-          resources.set(id, [...(resources.get(id) || []), issue.message])
-        }
-        continue
-      }
-      const match = /(?:assignment|task):(\S+)/.exec(where)
-      const id = match ? match[1] : null
-      if (!id) continue
-      if (issue.severity === 'error') flagged.add(id)
-      else if (issue.severity === 'warn') warned.add(id)
-    }
-    return { flaggedTasks: flagged, warnedTasks: warned, flaggedResources: resources }
-  }, [run])
+  const onCompare = () =>
+    guard(async () => {
+      const body = await api.compare(compareA, compareB)
+      setComparison(body)
+    })
 
-  const status = run?.status
-  const step = !run ? 0 : status === 'needs_llm' ? 1 : status === 'ready' ? 2 : 3
-  const packet = run?.packet || run?.structuring_packet || ''
-  const errorCount = (run?.issues || []).filter((i) => i.severity === 'error').length
+  const onGenerate = () =>
+    guard(async () => {
+      const run = await api.generate(prompt.id, viewVersion, modelName)
+      await refreshCurrent()
+      setOpenRun(run)
+      setTab('runs')
+      say('Output fetched from your model')
+    })
+
+  // -- derived ---------------------------------------------------------
+
+  const currentText = prompt?.selected_version?.text || ''
+  const dirty = prompt && draft !== currentText
+  const tally = matrix?.totals
+  const unreviewed = runs.filter((r) => r.verdict === 'unrated').length
+
+  const runLabel = (run) =>
+    `v${run.version} · ${run.model || 'unnamed'} · ${timeAgo(run.created_at)}`
+
+  const compareOptions = useMemo(
+    () => runs.map((r) => ({ id: r.id, label: runLabel(r) })), [runs])
 
   return (
     <div className="app">
       <header className="masthead">
         <div>
           <h1>MITSS</h1>
-          <p>Upload a plan, carry the packet to your model, get the answer checked.</p>
+          <p>Write a prompt, run it through your model, record what came back.</p>
         </div>
         <div className="row">
           {llm && (
             <span className={`chip ${llm.available ? 'ok' : 'wait'}`}>
               <span className="dot" />
-              model harness: {llm.provider}{llm.available ? '' : ' (paste)'}
+              {llm.provider}{llm.available ? '' : ' · paste'}
             </span>
           )}
         </div>
       </header>
 
-      <Steps current={step} />
-
       {error && <div className="banner error">{error}</div>}
+      {flash && <div className="banner info">{flash}</div>}
 
-      <Card
-        title="1 · Upload a plan"
-        hint="A .txt file. The backend parses the structured grammar directly; free-form text falls back to your model."
-        right={<button onClick={onSample} disabled={busy}>Load sample</button>}
-      >
-        <Dropzone onFile={onFile} busy={busy} />
-        {run && (
-          <div className="row" style={{ marginTop: 12 }}>
-            <span className="chip"><span className="dot" />{run.run_id}</span>
-            <span className={`chip ${status === 'ingested' ? 'ok' : status === 'rejected' ? 'bad' : 'wait'}`}>
-              <span className="dot" />{status}
-            </span>
-            {run.plan && <span className="chip">{run.plan.tasks.length} tasks · {run.plan.resources.length} resources</span>}
+      <div className="layout">
+        <aside className="sidebar">
+          <div className="side-head">
+            <span>Prompts</span>
+            <button onClick={onNewPrompt} disabled={busy}>New</button>
           </div>
-        )}
+
+          {prompts.length === 0 ? (
+            <Empty>Nothing yet.</Empty>
+          ) : (
+            <div className="prompt-list">
+              {prompts.map((entry) => (
+                <button
+                  key={entry.id}
+                  className={`prompt-item${prompt?.id === entry.id ? ' active' : ''}`}
+                  onClick={() => guard(() => loadPrompt(entry.id))}
+                >
+                  <span className="name">{entry.name}</span>
+                  <span className="meta">
+                    v{entry.latest_version} · {timeAgo(entry.updated_at)}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div className="side-drop">
+            <Dropzone onFile={(file) => onUpload(file, false)} busy={busy}
+                      label="Drop a .txt prompt" />
+          </div>
+        </aside>
+
+        <main className="main">
+          {!prompt ? (
+            <Card
+              title="Start here"
+              hint="Create a prompt, or drop a .txt file into the panel on the left."
+            >
+              <button className="primary" onClick={onNewPrompt} disabled={busy}>
+                New prompt
+              </button>
+            </Card>
+          ) : (
+            <>
+              <div className="prompt-head">
+                <input
+                  className="title-input"
+                  value={prompt.name}
+                  onChange={(event) => setPrompt({ ...prompt, name: event.target.value })}
+                  onBlur={(event) => {
+                    if (event.target.value.trim() && event.target.value !== prompt.name) return
+                    onRename(event.target.value)
+                  }}
+                  onKeyDown={(event) => event.key === 'Enter' && event.target.blur()}
+                />
+                <div className="row">
+                  {tally && (
+                    <span className="chip">
+                      {tally.total} run{tally.total === 1 ? '' : 's'}
+                      {unreviewed > 0 && ` · ${unreviewed} unread`}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <Tabs
+                value={tab}
+                onChange={setTab}
+                items={[
+                  { value: 'prompt', label: 'Prompt' },
+                  { value: 'runs', label: 'Outputs', badge: runs.length || null },
+                  { value: 'matrix', label: 'Matrix' },
+                  { value: 'compare', label: 'Compare' },
+                ]}
+              />
+
+              {tab === 'prompt' && (
+                <>
+                  <Card
+                    title={`Version ${viewVersion ?? '—'}${dirty ? ' (edited)' : ''}`}
+                    hint="Editing never overwrites a version. Saving creates the next one, so every recorded output stays tied to the exact text that produced it."
+                    right={
+                      <div className="row">
+                        <select
+                          value={viewVersion ?? ''}
+                          onChange={(event) =>
+                            guard(() => loadPrompt(prompt.id, Number(event.target.value)))}
+                        >
+                          {prompt.versions.map((v) => (
+                            <option key={v.version} value={v.version}>
+                              v{v.version}{v.note ? ` — ${v.note}` : ''}
+                            </option>
+                          ))}
+                        </select>
+                        <CopyButton text={draft} />
+                      </div>
+                    }
+                  >
+                    <textarea
+                      className="prompt-editor"
+                      value={draft}
+                      onChange={(event) => setDraft(event.target.value)}
+                      spellCheck={false}
+                    />
+                    <div className="row" style={{ marginTop: 10 }}>
+                      <Field label="What changed?">
+                        <input
+                          type="text"
+                          value={versionNote}
+                          onChange={(event) => setVersionNote(event.target.value)}
+                          placeholder="tightened the output rules"
+                        />
+                      </Field>
+                      <button className="primary" onClick={onSaveVersion} disabled={busy || !dirty}>
+                        Save as v{(prompt.latest_version || 0) + 1}
+                      </button>
+                    </div>
+                    {!dirty && (
+                      <p className="hint" style={{ marginTop: 8, marginBottom: 0 }}>
+                        No unsaved changes.
+                      </p>
+                    )}
+                  </Card>
+
+                  <Card
+                    title="Record an output"
+                    hint="Copy the prompt above, run it through your model, then paste what came back."
+                    right={
+                      llm?.available ? (
+                        <button onClick={onGenerate} disabled={busy}>
+                          Fetch from {llm.provider}
+                        </button>
+                      ) : null
+                    }
+                  >
+                    <div className="row">
+                      <Field label="Model">
+                        <input
+                          type="text"
+                          value={modelName}
+                          onChange={(event) => setModelName(event.target.value)}
+                          placeholder="your-custom-llm"
+                        />
+                      </Field>
+                      <Field label="Note (optional)">
+                        <input
+                          type="text"
+                          value={runNotes}
+                          onChange={(event) => setRunNotes(event.target.value)}
+                          placeholder="temperature 0, second attempt…"
+                        />
+                      </Field>
+                    </div>
+                    <label className="field" style={{ marginTop: 10 }}>Output</label>
+                    <textarea
+                      className="output-input"
+                      value={outputText}
+                      onChange={(event) => setOutputText(event.target.value)}
+                      placeholder="Paste the model's output verbatim."
+                      spellCheck={false}
+                    />
+                    <div className="row" style={{ marginTop: 10 }}>
+                      <button className="primary" onClick={onRecord}
+                              disabled={busy || !outputText.trim() || dirty}>
+                        Record output
+                      </button>
+                      {dirty && (
+                        <span className="hint" style={{ margin: 0 }}>
+                          Save the edited prompt first, so the output is tied to a real version.
+                        </span>
+                      )}
+                    </div>
+                  </Card>
+                </>
+              )}
+
+              {tab === 'runs' && (
+                <RunsTab
+                  runs={runs}
+                  openRun={openRun}
+                  onOpenRun={onOpenRun}
+                  onReview={onReview}
+                  onDelete={onDeleteRun}
+                  busy={busy}
+                  runLabel={runLabel}
+                />
+              )}
+
+              {tab === 'matrix' && (
+                <Card
+                  title="Versions against models"
+                  hint="Each cell shows the worst verdict recorded for that pairing. Click one to read it."
+                >
+                  {tally && tally.total > 0 && (
+                    <div className="tiles" style={{ marginBottom: 16 }}>
+                      <Stat label="Outputs" value={tally.total} />
+                      <Stat label="Accurate" value={tally.accurate} />
+                      <Stat label="Partly right" value={tally.partial} />
+                      <Stat label="Inaccurate" value={tally.inaccurate} />
+                      <Stat label="Not reviewed" value={tally.unrated} />
+                    </div>
+                  )}
+                  <Matrix matrix={matrix} onPick={onOpenRun}
+                          selected={openRun ? [openRun.id] : []} />
+                </Card>
+              )}
+
+              {tab === 'compare' && (
+                <CompareTab
+                  options={compareOptions}
+                  a={compareA} b={compareB}
+                  setA={setCompareA} setB={setCompareB}
+                  onCompare={onCompare}
+                  comparison={comparison}
+                  busy={busy}
+                />
+              )}
+            </>
+          )}
+        </main>
+      </div>
+    </div>
+  )
+}
+
+function RunsTab({ runs, openRun, onOpenRun, onReview, onDelete, busy, runLabel }) {
+  const [notesDraft, setNotesDraft] = useState('')
+
+  useEffect(() => { setNotesDraft(openRun?.notes || '') }, [openRun?.id])
+
+  if (runs.length === 0) {
+    return (
+      <Card title="Outputs">
+        <Empty>Nothing recorded for this prompt yet.</Empty>
+      </Card>
+    )
+  }
+
+  return (
+    <>
+      <Card title="Recorded outputs" tight>
+        <div className="run-list">
+          {runs.map((run) => (
+            <button
+              key={run.id}
+              className={`run-row${openRun?.id === run.id ? ' active' : ''}`}
+              onClick={() => onOpenRun(run.id)}
+            >
+              <Verdict value={run.verdict} />
+              <span className="run-main">{runLabel(run)}</span>
+              <span className="run-meta">{run.output_words} words</span>
+            </button>
+          ))}
+        </div>
       </Card>
 
-      {run && status === 'needs_llm' && (
+      {openRun && (
         <Card
-          title="2 · Have your model structure it"
-          hint="The text did not match the grammar, so it needs structuring first. Copy this packet to your model, then paste the reply back."
-          right={<CopyButton text={packet} />}
-        >
-          <Issues issues={run.issues} empty="the file did not use the structured grammar at all" />
-          <div className="spacer" />
-          <pre className="packet">{packet}</pre>
-          <div className="spacer" />
-          <label className="field">Your model's reply</label>
-          <textarea
-            value={planReply}
-            onChange={(event) => setPlanReply(event.target.value)}
-            placeholder="Paste the whole reply. Prose around the json block is fine."
-          />
-          <div className="spacer" />
-          <button className="primary" onClick={onAttachPlan} disabled={busy || !planReply.trim()}>
-            Accept plan
-          </button>
-        </Card>
-      )}
-
-      {run && run.plan && (status === 'ready' || status === 'ingested' || status === 'rejected') && (
-        <Card
-          title={`${status === 'ready' ? '2' : '2'} · Scheduling packet`}
-          hint="Copy this to your model. It carries the plan and every rule the answer will be checked against."
-          right={<CopyButton text={run.packet || ''} />}
-        >
-          <pre className="packet">{run.packet}</pre>
-        </Card>
-      )}
-
-      {run && run.plan && (
-        <Card
-          title="3 · Paste the schedule back"
-          hint="Record which model answered so a later diff between runs still means something."
-        >
-          <div className="row">
-            <div className="grow">
-              <label className="field">Model name</label>
-              <input
-                type="text"
-                value={modelName}
-                onChange={(event) => setModelName(event.target.value)}
-                placeholder="your-custom-llm"
-              />
-            </div>
-            <div className="grow">
-              <label className="field">Note (optional)</label>
-              <input
-                type="text"
-                value={note}
-                onChange={(event) => setNote(event.target.value)}
-                placeholder="baseline, second attempt, …"
-              />
-            </div>
-          </div>
-          <div className="spacer" />
-          <label className="field">Model reply</label>
-          <textarea
-            value={scheduleReply}
-            onChange={(event) => setScheduleReply(event.target.value)}
-            placeholder="Paste the whole reply. Prose around the json block is fine."
-          />
-          <div className="spacer" />
-          <div className="row">
-            <button className="primary" onClick={onIngest} disabled={busy || !scheduleReply.trim()}>
-              Check schedule
+          title={`v${openRun.version} · ${openRun.model || 'unnamed model'}`}
+          hint="Read it, then say what you concluded. That verdict is what the matrix shows."
+          right={
+            <button className="danger" onClick={() => onDelete(openRun.id)} disabled={busy}>
+              Delete
             </button>
-            {run.schedule && (
-              <a href={api.csvUrl(run.run_id)} download>
-                <button type="button">Download CSV</button>
-              </a>
-            )}
-          </div>
+          }
+        >
+          <VerdictPicker
+            value={openRun.verdict}
+            disabled={busy}
+            onChange={(verdict) => onReview(openRun.id, verdict, notesDraft)}
+          />
+
+          <label className="field" style={{ marginTop: 12 }}>Your notes</label>
+          <input
+            type="text"
+            value={notesDraft}
+            onChange={(event) => setNotesDraft(event.target.value)}
+            onBlur={() => {
+              if (notesDraft !== (openRun.notes || '')) {
+                onReview(openRun.id, openRun.verdict, notesDraft)
+              }
+            }}
+            placeholder="what was right, what was wrong"
+          />
+
+          <h3 className="section">Output</h3>
+          <DiffText plain={openRun.output} />
+
+          <details className="fold">
+            <summary>The exact prompt that produced this</summary>
+            <DiffText plain={openRun.prompt_text} />
+          </details>
         </Card>
       )}
+    </>
+  )
+}
 
-      {run && run.schedule && (
-        <>
-          <Card
-            title="4 · Result"
-            right={
-              <span className={`chip ${run.legal === false || status === 'rejected' ? 'bad' : 'ok'}`}>
-                <span className="dot" />
-                {status === 'rejected' || run.legal === false
-                  ? `${errorCount} constraint error${errorCount === 1 ? '' : 's'}`
-                  : 'legal schedule'}
-              </span>
-            }
-          >
-            <Tiles summary={run.summary} />
-            <div className="spacer" />
-            <div className="spacer" />
-            <Timeline
-              plan={run.plan}
-              schedule={run.schedule}
-              flaggedTasks={flaggedTasks}
-              warnedTasks={warnedTasks}
-              flaggedResources={flaggedResources}
-            />
-          </Card>
+function CompareTab({ options, a, b, setA, setB, onCompare, comparison, busy }) {
+  if (options.length < 2) {
+    return (
+      <Card title="Compare">
+        <Empty>Record at least two outputs for this prompt and they can be compared here.</Empty>
+      </Card>
+    )
+  }
 
-          <Card title="Assignments">
-            <ScheduleTable plan={run.plan} schedule={run.schedule} flaggedTasks={flaggedTasks} />
-          </Card>
+  return (
+    <>
+      <Card title="Compare two outputs" hint="Any two runs of this prompt — different versions, different models, or the same pairing twice.">
+        <div className="row">
+          <Field label="Left">
+            <select value={a} onChange={(event) => setA(event.target.value)}>
+              <option value="">choose a run</option>
+              {options.map((option) => (
+                <option key={option.id} value={option.id}>{option.label}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Right">
+            <select value={b} onChange={(event) => setB(event.target.value)}>
+              <option value="">choose a run</option>
+              {options.map((option) => (
+                <option key={option.id} value={option.id}>{option.label}</option>
+              ))}
+            </select>
+          </Field>
+          <button className="primary" onClick={onCompare} disabled={busy || !a || !b || a === b}>
+            Compare
+          </button>
+        </div>
+      </Card>
 
-          <Card title="Checks" hint="Everything the harness found, worst first.">
-            <Issues issues={run.issues} empty="every check passed" />
-          </Card>
-        </>
-      )}
-
-      {runs.length > 0 && (
-        <Card title="Runs" hint="Every upload is kept, including the ones that failed.">
-          <div className="runs">
-            {runs.map((entry) => (
-              <button
-                key={entry.run_id}
-                className={`run${run?.run_id === entry.run_id ? ' active' : ''}`}
-                onClick={() => onOpenRun(entry.run_id)}
-              >
-                <span>
-                  <span className="rid">{entry.run_id}</span>
-                  {entry.model && <span className="muted"> · {entry.model}</span>}
-                </span>
-                <span className={`chip ${entry.status === 'ingested' ? 'ok' : entry.status === 'rejected' ? 'bad' : 'wait'}`}>
-                  <span className="dot" />{entry.status}
-                </span>
-              </button>
-            ))}
+      {comparison && (
+        <Card
+          title="Output differences"
+          right={
+            <div className="row">
+              {comparison.same_prompt_version && <span className="chip">same prompt version</span>}
+              {comparison.same_model && <span className="chip">same model</span>}
+            </div>
+          }
+        >
+          <DiffLegend diff={comparison.output_diff} />
+          <div className="side-by-side">
+            <div>
+              <div className="col-head">
+                <Verdict value={comparison.left.verdict} />
+                <span>v{comparison.left.version} · {comparison.left.model || 'unnamed'}</span>
+              </div>
+              <DiffText spans={comparison.output_diff.left} />
+            </div>
+            <div>
+              <div className="col-head">
+                <Verdict value={comparison.right.verdict} />
+                <span>v{comparison.right.version} · {comparison.right.model || 'unnamed'}</span>
+              </div>
+              <DiffText spans={comparison.output_diff.right} />
+            </div>
           </div>
+
+          {!comparison.same_prompt_version && (
+            <details className="fold">
+              <summary>These used different prompts — show that diff too</summary>
+              <DiffLegend diff={comparison.prompt_diff} />
+              <div className="side-by-side">
+                <DiffText spans={comparison.prompt_diff.left} />
+                <DiffText spans={comparison.prompt_diff.right} />
+              </div>
+            </details>
+          )}
         </Card>
       )}
-    </div>
+    </>
   )
 }

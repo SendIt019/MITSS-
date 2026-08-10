@@ -1,7 +1,10 @@
-# Run artifacts: session data, model replies, generated reports.
-# Keep the folder, ignore its contents. See DECISIONS.md.
-runs/*
-!runs/.gitkeep
+# Your prompts, outputs and verdicts. Local working data, not source.
+# See DECISIONS.md.
+backend/data/
+
+# The scheduling example's own run folder (see backend/examples/).
+backend/runs/*
+!backend/runs/.gitkeep
 
 # Python
 __pycache__/
@@ -9,6 +12,16 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+
+# Node
+node_modules/
+dist/
+.vite/
+*.log
+
+# Local model configuration. Never commit credentials.
+.env
+backend/.env
 
 # Editor and OS noise
 .DS_Store

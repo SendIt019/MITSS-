@@ -1,13 +1,12 @@
 """End-to-end tests of the HTTP layer using FastAPI's test client.
 
-Each test runs against a throwaway root directory so runs never leak between
-tests or into the real runs/ folder.
+Each test runs against a throwaway root so nothing leaks between tests or into
+real data.
 """
 
 from __future__ import annotations
 
 import io
-import json
 import os
 import sys
 import tempfile
@@ -18,54 +17,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from fastapi.testclient import TestClient
     HAVE_FASTAPI = True
-except ImportError:  # pragma: no cover - exercised only on a bare install
+except ImportError:  # pragma: no cover - only on a bare install
     HAVE_FASTAPI = False
 
 if HAVE_FASTAPI:
     from app.main import app
-
-STRUCTURED = """SESSION: api-001
-HORIZON: 2026-08-11 08:00 -> 18:00
-GRID: 15min
-
-RESOURCE: alpha | Team Alpha | cap 1
-
-TASK: t1 | Survey  | 120min
-TASK: t2 | Setup   | 90min | after t1
-"""
-
-PROSE = "Survey the north site, then set up the gear, then calibrate everything."
-
-SCHEDULE_REPLY = """Here is the plan.
-
-```json
-{
-  "session": "api-001",
-  "assignments": [
-    {"task_id": "t1", "resource_id": "alpha",
-     "start": "2026-08-11T08:00:00", "end": "2026-08-11T10:00:00"},
-    {"task_id": "t2", "resource_id": "alpha",
-     "start": "2026-08-11T10:00:00", "end": "2026-08-11T11:30:00"}
-  ],
-  "unscheduled": [],
-  "rationale": "Sequential."
-}
-```
-"""
-
-PLAN_REPLY = """```json
-{
-  "session": "from-prose",
-  "horizon": {"start": "2026-08-11T08:00:00", "end": "2026-08-11T18:00:00"},
-  "granularity_minutes": 30,
-  "resources": [{"id": "crew", "name": "Crew", "capacity": 1}],
-  "tasks": [
-    {"id": "survey", "name": "Survey", "duration_minutes": 120},
-    {"id": "setup", "name": "Setup", "duration_minutes": 60, "depends_on": ["survey"]}
-  ]
-}
-```
-"""
 
 
 @unittest.skipUnless(HAVE_FASTAPI, "fastapi is not installed")
@@ -80,193 +36,249 @@ class Api(unittest.TestCase):
         os.environ.pop("MITSS_ROOT", None)
         self.tmp.cleanup()
 
-    def _upload(self, text, name="plan.txt"):
+    def _prompt(self, name="Summarise", text="Summarise the passage."):
         return self.client.post(
-            "/api/uploads",
-            files={"file": (name, io.BytesIO(text.encode("utf-8")), "text/plain")},
-        )
+            "/api/prompts", json={"name": name, "text": text}
+        ).json()
+
+    def _run(self, prompt_id, model="model-a", output="a summary", version=None,
+             verdict="unrated"):
+        return self.client.post("/api/runs", json={
+            "prompt_id": prompt_id, "version": version, "model": model,
+            "output": output, "verdict": verdict,
+        }).json()
 
     # -- basics ---------------------------------------------------------
 
     def test_health(self):
-        response = self.client.get("/api/health")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["status"], "ok")
+        self.assertEqual(self.client.get("/api/health").json()["status"], "ok")
 
-    def test_llm_status_defaults_to_manual(self):
+    def test_llm_defaults_to_manual(self):
         body = self.client.get("/api/llm").json()
         self.assertEqual(body["provider"], "manual")
         self.assertFalse(body["available"])
 
-    # -- upload ---------------------------------------------------------
+    def test_verdict_options(self):
+        verdicts = self.client.get("/api/verdicts").json()["verdicts"]
+        self.assertEqual([v["value"] for v in verdicts],
+                         ["unrated", "accurate", "partial", "inaccurate"])
 
-    def test_structured_upload_is_ready_with_a_packet(self):
-        body = self._upload(STRUCTURED).json()
-        self.assertEqual(body["status"], "ready")
-        self.assertEqual(body["session"], "api-001")
-        self.assertEqual(len(body["plan"]["tasks"]), 2)
-        self.assertIn("```json", body["packet"])
-        self.assertIsNone(body["structuring_packet"])
+    # -- prompts --------------------------------------------------------
 
-    def test_prose_upload_falls_back_to_the_model(self):
-        body = self._upload(PROSE).json()
-        self.assertEqual(body["status"], "needs_llm")
-        self.assertIsNone(body["plan"])
-        self.assertIn("structuring request", body["structuring_packet"])
-        self.assertIn(PROSE, body["structuring_packet"])
+    def test_create_and_fetch_prompt(self):
+        body = self._prompt()
+        self.assertEqual(body["id"], "summarise")
+        self.assertEqual(body["version_count"], 1)
+        self.assertEqual(body["selected_version"]["text"], "Summarise the passage.")
 
-    def test_broken_grammar_falls_back_and_reports_line_numbers(self):
-        broken = STRUCTURED.replace("TASK: t1 | Survey  | 120min", "TASK: t1 | Survey")
-        body = self._upload(broken).json()
-        self.assertEqual(body["status"], "needs_llm")
-        codes = {i["code"] for i in body["issues"]}
-        self.assertIn("missing_duration", codes)
-        self.assertTrue(any(i["where"].startswith("line") for i in body["issues"]))
+        again = self.client.get("/api/prompts/summarise").json()
+        self.assertEqual(again["latest_version"], 1)
 
-    def test_non_txt_rejected(self):
-        response = self.client.post(
-            "/api/uploads",
-            files={"file": ("plan.pdf", io.BytesIO(b"x"), "application/pdf")},
-        )
+    def test_empty_prompt_rejected(self):
+        response = self.client.post("/api/prompts", json={"name": "x", "text": "   "})
         self.assertEqual(response.status_code, 400)
 
-    def test_empty_file_rejected(self):
-        self.assertEqual(self._upload("   ").status_code, 400)
+    def test_add_version(self):
+        prompt = self._prompt()
+        body = self.client.post(
+            f"/api/prompts/{prompt['id']}/versions",
+            json={"text": "Summarise in one sentence.", "note": "tighter"},
+        ).json()
+        self.assertEqual(body["version_count"], 2)
+        self.assertEqual(body["selected_version"]["version"], 2)
+        self.assertEqual(body["versions"][1]["note"], "tighter")
 
-    def test_non_utf8_rejected(self):
+    def test_identical_version_is_refused(self):
+        prompt = self._prompt()
         response = self.client.post(
-            "/api/uploads",
-            files={"file": ("plan.txt", io.BytesIO(b"\xff\xfe\x00bad"), "text/plain")},
-        )
-        self.assertEqual(response.status_code, 400)
-
-    # -- structuring fallback -------------------------------------------
-
-    def test_attaching_a_model_plan_makes_the_run_ready(self):
-        run_id = self._upload(PROSE).json()["run_id"]
-        body = self.client.post(
-            f"/api/runs/{run_id}/plan", json={"raw": PLAN_REPLY}
-        ).json()
-        self.assertEqual(body["status"], "ready")
-        self.assertEqual(len(body["plan"]["tasks"]), 2)
-        self.assertIn("```json", body["packet"])
-
-    def test_unparseable_model_plan_keeps_the_run_waiting(self):
-        run_id = self._upload(PROSE).json()["run_id"]
-        body = self.client.post(
-            f"/api/runs/{run_id}/plan", json={"raw": "I could not do it"}
-        ).json()
-        self.assertEqual(body["status"], "needs_llm")
-        self.assertIn("unparseable_output", {i["code"] for i in body["issues"]})
-
-    # -- scheduling round trip ------------------------------------------
-
-    def test_legal_schedule_is_accepted_and_recorded(self):
-        run_id = self._upload(STRUCTURED).json()["run_id"]
-        body = self.client.post(
-            f"/api/runs/{run_id}/ingest",
-            json={"raw": SCHEDULE_REPLY, "model": "custom-llm-1", "note": "first"},
-        ).json()
-        self.assertTrue(body["legal"])
-        self.assertEqual(body["status"], "ingested")
-        self.assertEqual(body["model"], "custom-llm-1")
-        self.assertEqual(len(body["schedule"]["assignments"]), 2)
-        self.assertEqual(body["summary"]["tasks_scheduled"], 2)
-
-    def test_illegal_schedule_is_rejected_with_reasons(self):
-        run_id = self._upload(STRUCTURED).json()["run_id"]
-        broken = SCHEDULE_REPLY.replace('"end": "2026-08-11T10:00:00"',
-                                        '"end": "2026-08-11T09:00:00"')
-        body = self.client.post(
-            f"/api/runs/{run_id}/ingest", json={"raw": broken, "model": "custom-llm-1"}
-        ).json()
-        self.assertFalse(body["legal"])
-        self.assertEqual(body["status"], "rejected")
-        codes = {i["code"] for i in body["issues"]}
-        self.assertIn("duration_mismatch", codes)
-
-    def test_ingest_before_a_plan_exists_is_a_conflict(self):
-        run_id = self._upload(PROSE).json()["run_id"]
-        response = self.client.post(
-            f"/api/runs/{run_id}/ingest", json={"raw": SCHEDULE_REPLY}
+            f"/api/prompts/{prompt['id']}/versions",
+            json={"text": "Summarise the passage."},
         )
         self.assertEqual(response.status_code, 409)
 
-    def test_solve_with_manual_provider_reports_conflict(self):
-        run_id = self._upload(STRUCTURED).json()["run_id"]
-        response = self.client.post(f"/api/runs/{run_id}/solve")
+    def test_fetch_specific_version(self):
+        prompt = self._prompt()
+        self.client.post(f"/api/prompts/{prompt['id']}/versions", json={"text": "v2 text"})
+        body = self.client.get(f"/api/prompts/{prompt['id']}?version=1").json()
+        self.assertEqual(body["selected_version"]["text"], "Summarise the passage.")
+
+    def test_version_text_as_plain_text(self):
+        prompt = self._prompt()
+        response = self.client.get(f"/api/prompts/{prompt['id']}/versions/1/text")
+        self.assertEqual(response.text, "Summarise the passage.")
+
+    def test_rename(self):
+        prompt = self._prompt()
+        body = self.client.patch(f"/api/prompts/{prompt['id']}",
+                                 json={"name": "Summarise tightly"}).json()
+        self.assertEqual(body["name"], "Summarise tightly")
+        self.assertEqual(body["id"], prompt["id"])
+
+    def test_unknown_prompt_is_404(self):
+        self.assertEqual(self.client.get("/api/prompts/nope").status_code, 404)
+
+    # -- uploads --------------------------------------------------------
+
+    def _upload(self, text, name="my-prompt.txt", prompt_id="", note=""):
+        return self.client.post(
+            "/api/uploads",
+            files={"file": (name, io.BytesIO(text.encode("utf-8")), "text/plain")},
+            data={"prompt_id": prompt_id, "note": note},
+        )
+
+    def test_upload_creates_a_prompt(self):
+        body = self._upload("Classify the sentiment of the text.").json()
+        self.assertEqual(body["id"], "my-prompt")
+        self.assertEqual(body["selected_version"]["text"],
+                         "Classify the sentiment of the text.")
+
+    def test_upload_to_existing_prompt_adds_a_version(self):
+        prompt = self._prompt()
+        body = self._upload("A revised prompt.", prompt_id=prompt["id"]).json()
+        self.assertEqual(body["id"], prompt["id"])
+        self.assertEqual(body["version_count"], 2)
+
+    def test_upload_rejects_non_text(self):
+        response = self.client.post(
+            "/api/uploads",
+            files={"file": ("x.pdf", io.BytesIO(b"x"), "application/pdf")},
+            data={"prompt_id": "", "note": ""},
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_upload_rejects_empty(self):
+        self.assertEqual(self._upload("   ").status_code, 400)
+
+    def test_upload_rejects_non_utf8(self):
+        response = self.client.post(
+            "/api/uploads",
+            files={"file": ("x.txt", io.BytesIO(b"\xff\xfe\x00"), "text/plain")},
+            data={"prompt_id": "", "note": ""},
+        )
+        self.assertEqual(response.status_code, 400)
+
+    # -- runs -----------------------------------------------------------
+
+    def test_record_a_run(self):
+        prompt = self._prompt()
+        body = self._run(prompt["id"], model="custom-llm-1", output="the summary")
+        self.assertEqual(body["model"], "custom-llm-1")
+        self.assertEqual(body["version"], 1)
+        self.assertEqual(body["verdict"], "unrated")
+        self.assertEqual(body["output"], "the summary")
+        self.assertEqual(body["prompt_text"], "Summarise the passage.")
+
+    def test_run_defaults_to_latest_version(self):
+        prompt = self._prompt()
+        self.client.post(f"/api/prompts/{prompt['id']}/versions", json={"text": "v2"})
+        body = self._run(prompt["id"])
+        self.assertEqual(body["version"], 2)
+
+    def test_empty_output_rejected(self):
+        prompt = self._prompt()
+        response = self.client.post("/api/runs", json={
+            "prompt_id": prompt["id"], "model": "m", "output": "  "})
+        self.assertEqual(response.status_code, 400)
+
+    def test_bad_verdict_rejected(self):
+        prompt = self._prompt()
+        response = self.client.post("/api/runs", json={
+            "prompt_id": prompt["id"], "model": "m", "output": "x",
+            "verdict": "excellent"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_review_a_run(self):
+        prompt = self._prompt()
+        run = self._run(prompt["id"])
+        body = self.client.patch(f"/api/runs/{run['id']}", json={
+            "verdict": "partial", "notes": "missed the third point"}).json()
+        self.assertEqual(body["verdict"], "partial")
+        self.assertEqual(body["verdict_label"], "partly right")
+        self.assertIn("third point", body["notes"])
+        self.assertTrue(body["reviewed_at"])
+
+    def test_list_and_filter_runs(self):
+        prompt = self._prompt()
+        self._run(prompt["id"], model="model-a")
+        self._run(prompt["id"], model="model-b")
+        self.assertEqual(len(self.client.get("/api/runs").json()["runs"]), 2)
+        filtered = self.client.get("/api/runs?model=model-b").json()["runs"]
+        self.assertEqual(len(filtered), 1)
+
+    def test_delete_run(self):
+        prompt = self._prompt()
+        run = self._run(prompt["id"])
+        self.assertEqual(self.client.delete(f"/api/runs/{run['id']}").status_code, 200)
+        self.assertEqual(self.client.get(f"/api/runs/{run['id']}").status_code, 404)
+
+    def test_generate_with_manual_provider_is_a_conflict(self):
+        prompt = self._prompt()
+        response = self.client.post("/api/generate", json={"prompt_id": prompt["id"]})
         self.assertEqual(response.status_code, 409)
         self.assertIn("paste", response.json()["detail"])
 
-    # -- reads ----------------------------------------------------------
+    # -- comparison -----------------------------------------------------
 
-    def test_run_listing_and_detail(self):
-        run_id = self._upload(STRUCTURED).json()["run_id"]
-        self.client.post(
-            f"/api/runs/{run_id}/ingest",
-            json={"raw": SCHEDULE_REPLY, "model": "custom-llm-1"},
-        )
+    def test_matrix_shape(self):
+        prompt = self._prompt()
+        self.client.post(f"/api/prompts/{prompt['id']}/versions", json={"text": "v2"})
+        first = self._run(prompt["id"], model="model-a", version=1)
+        self._run(prompt["id"], model="model-b", version=2)
+        self.client.patch(f"/api/runs/{first['id']}", json={"verdict": "inaccurate"})
 
-        listing = self.client.get("/api/runs").json()["runs"]
-        self.assertEqual(len(listing), 1)
-        self.assertEqual(listing[0]["status"], "ingested")
-        self.assertEqual(listing[0]["model"], "custom-llm-1")
-        self.assertEqual(listing[0]["assignments"], 2)
+        grid = self.client.get(f"/api/prompts/{prompt['id']}/matrix").json()
+        self.assertEqual(grid["versions"], [1, 2])
+        self.assertEqual(grid["models"], ["model-a", "model-b"])
+        self.assertEqual(grid["cells"]["1|model-a"]["verdict"], "inaccurate")
+        self.assertEqual(grid["cells"]["2|model-b"]["verdict"], "unrated")
+        self.assertEqual(grid["totals"]["total"], 2)
 
-        detail = self.client.get(f"/api/runs/{run_id}").json()
-        self.assertEqual(detail["run_id"], run_id)
-        self.assertIn("SESSION: api-001", detail["source_text"])
-        self.assertIsNotNone(detail["schedule"])
+    def test_compare_two_outputs(self):
+        prompt = self._prompt()
+        a = self._run(prompt["id"], model="model-a", output="the quick brown fox")
+        b = self._run(prompt["id"], model="model-b", output="the quick red fox")
+        body = self.client.get(f"/api/compare?a={a['id']}&b={b['id']}").json()
 
-    def test_packet_endpoint_returns_markdown(self):
-        run_id = self._upload(STRUCTURED).json()["run_id"]
-        response = self.client.get(f"/api/runs/{run_id}/packet")
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("MITSS scheduling request", response.text)
+        self.assertTrue(body["same_prompt_version"])
+        self.assertFalse(body["same_model"])
+        diff = body["output_diff"]
+        self.assertEqual(diff["added_words"], 1)
+        self.assertEqual(diff["removed_words"], 1)
+        self.assertFalse(diff["identical"])
 
-    def test_csv_export(self):
-        run_id = self._upload(STRUCTURED).json()["run_id"]
-        self.client.post(f"/api/runs/{run_id}/ingest", json={"raw": SCHEDULE_REPLY})
-        response = self.client.get(f"/api/runs/{run_id}/export.csv")
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.text.startswith("task_id,"))
-        self.assertIn("attachment", response.headers["content-disposition"])
+    def test_compare_identical_outputs(self):
+        prompt = self._prompt()
+        a = self._run(prompt["id"], model="model-a", output="same words here")
+        b = self._run(prompt["id"], model="model-b", output="same words here")
+        diff = self.client.get(f"/api/compare?a={a['id']}&b={b['id']}").json()["output_diff"]
+        self.assertTrue(diff["identical"])
+        self.assertEqual(diff["similarity"], 1.0)
 
-    def test_csv_export_before_a_schedule_is_a_conflict(self):
-        run_id = self._upload(STRUCTURED).json()["run_id"]
-        self.assertEqual(
-            self.client.get(f"/api/runs/{run_id}/export.csv").status_code, 409
-        )
+    def test_compare_prompt_versions(self):
+        prompt = self._prompt()
+        self.client.post(f"/api/prompts/{prompt['id']}/versions",
+                         json={"text": "Summarise the passage briefly."})
+        body = self.client.get(
+            f"/api/prompts/{prompt['id']}/compare-versions?a=1&b=2").json()
+        diff = body["diff"]
+        self.assertFalse(diff["identical"])
+        # Punctuation rides along with its word, so "passage." becoming
+        # "passage briefly." is one token replaced by two rather than a bare
+        # insertion. What matters is that the new word surfaces as added.
+        added = " ".join(s["text"] for s in diff["right"] if s["kind"] == "added")
+        self.assertIn("briefly", added)
+        self.assertNotIn("Summarise", added)
 
-    def test_unknown_run_is_404(self):
-        self.assertEqual(self.client.get("/api/runs/nope").status_code, 404)
+    def test_compare_unknown_run_is_404(self):
+        self.assertEqual(self.client.get("/api/compare?a=x&b=y").status_code, 404)
 
-    def test_diff_two_runs_from_different_models(self):
-        first = self._upload(STRUCTURED).json()["run_id"]
-        self.client.post(f"/api/runs/{first}/ingest",
-                         json={"raw": SCHEDULE_REPLY, "model": "model-a"})
-
-        second = self._upload(STRUCTURED).json()["run_id"]
-        shifted = SCHEDULE_REPLY.replace("T10:00:00", "T10:30:00")
-        self.client.post(f"/api/runs/{second}/ingest",
-                         json={"raw": shifted, "model": "model-b"})
-
-        body = self.client.get(f"/api/diff?a={first}&b={second}").json()
-        self.assertEqual(body["a"]["model"], "model-a")
-        self.assertEqual(body["b"]["model"], "model-b")
-        self.assertFalse(body["identical"])
-        self.assertTrue(body["changes"])
-
-    def test_diff_of_identical_runs_reports_agreement(self):
-        first = self._upload(STRUCTURED).json()["run_id"]
-        self.client.post(f"/api/runs/{first}/ingest",
-                         json={"raw": SCHEDULE_REPLY, "model": "model-a"})
-        second = self._upload(STRUCTURED).json()["run_id"]
-        self.client.post(f"/api/runs/{second}/ingest",
-                         json={"raw": SCHEDULE_REPLY, "model": "model-b"})
-        body = self.client.get(f"/api/diff?a={first}&b={second}").json()
-        self.assertTrue(body["identical"])
-        self.assertEqual(body["changes"], [])
+    def test_activity_log(self):
+        prompt = self._prompt()
+        self._run(prompt["id"])
+        events = self.client.get("/api/activity").json()["events"]
+        kinds = [e["event"] for e in events]
+        self.assertEqual(kinds[0], "prompt_created")
+        self.assertIn("run_recorded", kinds)
 
 
 if __name__ == "__main__":

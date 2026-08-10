@@ -1,5 +1,4 @@
-// Thin wrapper over the backend. Every call goes through request() so error
-// handling and JSON decoding live in exactly one place.
+// Thin wrapper over the backend. Error handling and decoding live here only.
 
 const BASE = import.meta.env.VITE_API_BASE || ''
 
@@ -25,42 +24,47 @@ async function request(path, options = {}) {
   return response.text()
 }
 
+const json = (method, body) => ({
+  method,
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+})
+
 export const api = {
   health: () => request('/api/health'),
-
   llm: () => request('/api/llm'),
+  verdicts: () => request('/api/verdicts'),
+  activity: (limit = 50) => request(`/api/activity?limit=${limit}`),
 
-  upload(file) {
+  prompts: () => request('/api/prompts'),
+  prompt: (id, version) =>
+    request(`/api/prompts/${id}${version ? `?version=${version}` : ''}`),
+  createPrompt: (name, text, note) =>
+    request('/api/prompts', json('POST', { name, text, note })),
+  addVersion: (id, text, note) =>
+    request(`/api/prompts/${id}/versions`, json('POST', { text, note })),
+  renamePrompt: (id, name) => request(`/api/prompts/${id}`, json('PATCH', { name })),
+
+  upload(file, promptId = '', note = '') {
     const form = new FormData()
     form.append('file', file)
+    form.append('prompt_id', promptId)
+    form.append('note', note)
     return request('/api/uploads', { method: 'POST', body: form })
   },
 
-  attachPlan(runId, raw) {
-    return request(`/api/runs/${runId}/plan`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ raw }),
-    })
-  },
+  recordRun: (payload) => request('/api/runs', json('POST', payload)),
+  runs: (promptId) =>
+    request(`/api/runs${promptId ? `?prompt_id=${promptId}` : ''}`),
+  run: (id) => request(`/api/runs/${id}`),
+  review: (id, verdict, notes) =>
+    request(`/api/runs/${id}`, json('PATCH', { verdict, notes })),
+  deleteRun: (id) => request(`/api/runs/${id}`, { method: 'DELETE' }),
+  generate: (promptId, version, model) =>
+    request('/api/generate', json('POST', { prompt_id: promptId, version, model })),
 
-  ingest(runId, raw, model, note) {
-    return request(`/api/runs/${runId}/ingest`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ raw, model, note }),
-    })
-  },
-
-  solve(runId) {
-    return request(`/api/runs/${runId}/solve`, { method: 'POST' })
-  },
-
-  runs: () => request('/api/runs'),
-
-  run: (runId) => request(`/api/runs/${runId}`),
-
-  diff: (a, b) => request(`/api/diff?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`),
-
-  csvUrl: (runId) => `${BASE}/api/runs/${runId}/export.csv`,
+  matrix: (promptId) => request(`/api/prompts/${promptId}/matrix`),
+  compare: (a, b) => request(`/api/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`),
+  compareVersions: (promptId, a, b) =>
+    request(`/api/prompts/${promptId}/compare-versions?a=${a}&b=${b}`),
 }
