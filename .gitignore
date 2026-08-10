@@ -1,0 +1,17 @@
+# Run artifacts: session data, model replies, generated reports.
+# Keep the folder, ignore its contents. See DECISIONS.md.
+runs/*
+!runs/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+_to_delete/

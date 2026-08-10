@@ -1,0 +1,60 @@
+{
+  "session": "example-001",
+  "domain": "generic",
+  "horizon": {
+    "start": "2026-08-11T08:00:00",
+    "end": "2026-08-11T18:00:00"
+  },
+  "granularity_minutes": 15,
+  "objectives": [
+    "schedule every task inside the horizon",
+    "finish as early as possible"
+  ],
+  "notes": "Replace this with any context the model should know.",
+  "resources": [
+    {
+      "id": "alpha",
+      "name": "Team Alpha",
+      "capacity": 1,
+      "available": []
+    },
+    {
+      "id": "bravo",
+      "name": "Team Bravo",
+      "capacity": 1,
+      "available": []
+    }
+  ],
+  "tasks": [
+    {
+      "id": "t1",
+      "name": "Site survey",
+      "duration_minutes": 120,
+      "depends_on": [],
+      "requires": [],
+      "priority": 1
+    },
+    {
+      "id": "t2",
+      "name": "Equipment setup",
+      "duration_minutes": 90,
+      "depends_on": [
+        "t1"
+      ],
+      "requires": [],
+      "priority": 2
+    },
+    {
+      "id": "t3",
+      "name": "Calibration run",
+      "duration_minutes": 60,
+      "depends_on": [
+        "t2"
+      ],
+      "requires": [
+        "alpha"
+      ],
+      "priority": 2
+    }
+  ]
+}
