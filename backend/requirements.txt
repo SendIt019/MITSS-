@@ -1,0 +1,4 @@
+# The mitss core package needs nothing. These are only for the HTTP layer.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9

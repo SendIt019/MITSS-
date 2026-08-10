@@ -108,3 +108,63 @@ than failing, so a quick run is never blocked.
 
 Consequence: sending one plan to several models and diffing their schedules is
 now a first-class workflow rather than something to reconstruct by memory.
+
+## 2026-08-10 15:20 EDT — Split into /frontend and /backend
+
+Restructured from a flat Python package into a standard two-tier application:
+React (Vite) in `frontend/`, FastAPI in `backend/`. The existing core package
+moved to `backend/mitss/` unchanged, along with its tests, inputs and runs.
+
+The core keeps its zero-dependency rule; FastAPI and uvicorn are required only
+by `backend/app/`. That boundary is deliberate — the scheduling logic stays
+importable and testable without a web stack, and the command line still works.
+
+## 2026-08-10 15:22 EDT — Text input: structured grammar first, model as fallback
+
+Uploaded `.txt` files are parsed by a deterministic line-oriented grammar. If
+the file does not match, the raw text plus the parser's complaints are handed to
+the model to structure, and the structured result is validated exactly like a
+hand-written plan before it is accepted.
+
+Rationale: a deterministic parse gives exact line-numbered errors and identical
+results every run. Reserving the model for the cases the grammar cannot read
+keeps that property where it is available without making the strict format a
+precondition for using the tool.
+
+## 2026-08-10 15:24 EDT — Model harness: provider interface, manual by default
+
+`LLMProvider` is an abstract interface. Two implementations ship: `manual` (the
+default — produces no completion, so the operator carries the packet) and `http`
+(posts to a configurable endpoint, in either the openai chat-completions shape
+or a plain `{"prompt": ...}` body). Custom providers register by name.
+
+Credentials come from the environment at call time, are sent once in the request
+header, and are never logged, returned by the API, or written to a run folder.
+`describe()` reports only whether a key is set. A test asserts that an API key
+does not appear in an error message.
+
+Rationale: the harness must never depend on a model being reachable, and it must
+never become a place credentials accumulate.
+
+## 2026-08-10 15:40 EDT — Chart colour carries status, not identity
+
+In the timeline, identity is carried by the row (which resource) and the label
+on the bar (which task), so the fill is free to encode status instead. Clean
+blocks use the validated series blue; blocks with a constraint error use status
+critical plus an icon, never colour alone.
+
+Warnings deliberately do not recolour a bar: the warning yellow fails the fill
+lightness band against the chart surface. Warned blocks carry an icon and appear
+in the issues list. The two-fill palette was checked with the palette validator
+and passes every gate in both light and dark mode.
+
+## 2026-08-10 15:46 EDT — Fixed: overlapping bars hid the conflict
+
+Bars on one resource row were drawn at a fixed vertical offset, so a later bar
+painted over an earlier one. A double-booking — the single most important thing
+to see — rendered as two neat adjacent blocks.
+
+Bars are now assigned to lanes by greedy interval partitioning and the row grows
+to fit, so concurrent work is stacked and visible. Resource-level errors such as
+over-capacity also mark the row label, since they implicate the row rather than
+any one bar. Verified by measuring rendered geometry in a browser, not by eye.

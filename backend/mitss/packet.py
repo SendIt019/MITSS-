@@ -27,6 +27,81 @@ OUTPUT_CONTRACT = """{
   "rationale": "<short explanation of the approach taken>"
 }"""
 
+PLAN_CONTRACT = """{
+  "session": "<short identifier>",
+  "domain": "<what is being scheduled, one or two words>",
+  "horizon": {"start": "YYYY-MM-DDTHH:MM:SS", "end": "YYYY-MM-DDTHH:MM:SS"},
+  "granularity_minutes": 15,
+  "objectives": ["<goal>", "..."],
+  "notes": "<anything that did not fit the fields above>",
+  "resources": [
+    {"id": "<short id>", "name": "<label>", "capacity": 1,
+     "available": [{"start": "YYYY-MM-DDTHH:MM:SS", "end": "YYYY-MM-DDTHH:MM:SS"}]}
+  ],
+  "tasks": [
+    {"id": "<short id>", "name": "<label>", "duration_minutes": 60,
+     "depends_on": ["<task id>"], "requires": ["<resource id>"],
+     "earliest_start": null, "deadline": null, "priority": 3}
+  ]
+}"""
+
+
+def build_structuring_packet(raw_text: str, parse_issues=None) -> str:
+    """Ask a model to turn free-form text into a structured plan.
+
+    Used when an uploaded file does not match the text grammar. The model is
+    structuring the input here, not solving it — scheduling happens later, and
+    the structured result is validated before it is accepted either way.
+    """
+    lines = [
+        "# MITSS plan structuring request",
+        "",
+        "The text below describes a scheduling problem in free form. Convert it "
+        "into the structured plan format shown at the bottom.",
+        "",
+        "## Rules",
+        "",
+        "- Return exactly one JSON object inside a single ```json fenced code block, "
+        "with no prose outside the block.",
+        "- Invent nothing. If the text does not state a duration, a dependency, or a "
+        "resource, leave it out rather than guessing a value.",
+        "- Give every task and resource a short lowercase id with no spaces.",
+        "- Durations are whole minutes.",
+        "- If the text implies an ordering (\"after\", \"once X is done\", \"then\"), "
+        "express it in `depends_on`.",
+        "- If a task can only be done by a particular resource, list that resource in "
+        "`requires`. Otherwise leave `requires` empty.",
+        "- `capacity` is how many tasks a resource can run at the same time; use 1 "
+        "unless the text says otherwise.",
+        "- If no explicit horizon is given, choose the smallest window that fits all "
+        "the work described, and say so in `notes`.",
+        "- Timestamps use YYYY-MM-DDTHH:MM:SS with no timezone suffix.",
+    ]
+
+    if parse_issues:
+        lines += ["", "## Why the deterministic parser could not read it", ""]
+        for issue in parse_issues[:12]:
+            lines.append(f"- {issue}")
+
+    lines += [
+        "",
+        "## Text to convert",
+        "",
+        "```text",
+        raw_text.strip(),
+        "```",
+        "",
+        "## Required output shape",
+        "",
+        "```json",
+        PLAN_CONTRACT,
+        "```",
+        "",
+        "Return only that JSON object, in one fenced block.",
+        "",
+    ]
+    return "\n".join(lines)
+
 
 def build_packet(plan: Plan) -> str:
     """Return the markdown packet to paste into the model."""
