@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime
 from typing import List, Optional
 
 from .capture import extract_json
@@ -119,6 +120,11 @@ def _pick_input(store: RunStore, explicit: Optional[str]) -> Optional[str]:
         print(f"note: {len(candidates)} input files found, using the first: {candidates[0]}")
         print("      pass --input to choose a different one")
     return os.path.join(store.inputs_dir, candidates[0])
+
+
+def _model_of(store: RunStore, run_id: str) -> str:
+    meta = store.read_json(run_id, "meta.json") or {}
+    return meta.get("model", "") or "unrecorded"
 
 
 def _rebuild(store: RunStore, run_id: str):
@@ -272,6 +278,19 @@ def cmd_ingest(args, store: RunStore) -> int:
     counts = count_by_severity(all_issues)
     store.write_json(run_id, "issues.json", [i.to_dict() for i in all_issues])
 
+    # Provenance: which model answered, and any operator note. Kept in its own
+    # file so re-ingesting a run does not lose it.
+    meta = store.read_json(run_id, "meta.json") or {}
+    if args.model:
+        meta["model"] = args.model
+    if args.note:
+        meta["note"] = args.note
+    meta["ingested_at"] = datetime.now().isoformat(timespec="seconds")
+    store.write_json(run_id, "meta.json", meta)
+    if not meta.get("model"):
+        print("\nnote: no model recorded for this run - pass --model NAME so diffs "
+              "across models stay meaningful")
+
     if schedule is not None:
         store.write_json(run_id, "schedule.json", schedule.to_dict())
         metrics = summarize(plan, schedule)
@@ -285,6 +304,7 @@ def cmd_ingest(args, store: RunStore) -> int:
             "event": "ingest",
             "run_id": run_id,
             "session": plan.session,
+            "model": meta.get("model", ""),
             "parsed": parsed is not None,
             "valid": schedule is not None and not has_errors(all_issues),
             "errors": counts["error"],
@@ -318,7 +338,8 @@ def cmd_report(args, store: RunStore) -> int:
         return 1
 
     wanted = args.format
-    print(f"run {run_id} - session {plan.session}\n")
+    if wanted != "csv":
+        print(f"run {run_id} - session {plan.session} - model {_model_of(store, run_id)}\n")
 
     if wanted in ("table", "all"):
         print(render_table(plan, schedule))
@@ -351,7 +372,9 @@ def cmd_diff(args, store: RunStore) -> int:
     if schedule_a is None or schedule_b is None:
         print(problem_a or problem_b or "one of the runs has no schedule")
         return 1
-    print(render_diff(schedule_a, schedule_b, run_a, run_b))
+    label_a = f"{run_a} [{_model_of(store, run_a)}]"
+    label_b = f"{run_b} [{_model_of(store, run_b)}]"
+    print(render_diff(schedule_a, schedule_b, label_a, label_b))
     return 0
 
 
@@ -367,8 +390,9 @@ def cmd_log(args, store: RunStore) -> int:
             line += f"  tasks={event.get('tasks')} resources={event.get('resources')}"
         elif kind == "ingest":
             verdict = "clean" if event.get("valid") else "FAILED"
+            model = event.get("model") or "unrecorded"
             line += (
-                f"  {verdict} assignments={event.get('assignments')} "
+                f"  {verdict} model={model} assignments={event.get('assignments')} "
                 f"errors={event.get('errors')} warnings={event.get('warnings')}"
             )
         print(line)
@@ -418,6 +442,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ingest.add_argument("run_id", nargs="?", help="run id or prefix (default: latest)")
     p_ingest.add_argument("--file", help="read the reply from this file instead")
     p_ingest.add_argument("--stdin", action="store_true", help="read the reply from stdin")
+    p_ingest.add_argument("--model", help="which model produced this reply (recorded as provenance)")
+    p_ingest.add_argument("--note", help="free-text note stored with the run")
     p_ingest.set_defaults(func=cmd_ingest)
 
     p_report = sub.add_parser("report", help="render a stored schedule")

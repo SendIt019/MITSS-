@@ -3,11 +3,19 @@
 An input/output harness for language-model scheduling runs.
 
 MITSS does not schedule anything and does not call any model. You feed it a
-plan, it builds a prompt packet, you hand that packet to a model, you paste the
-reply back, and MITSS decides whether the answer is actually legal — then
-records the whole exchange so runs can be compared over time.
+plan, it builds a prompt packet, you hand that packet to whatever model you
+like, you paste the reply back, and MITSS decides whether the answer is
+actually legal — then records the whole exchange so runs can be compared over
+time.
 
 The point is that model output gets **checked**, not trusted.
+
+**Model-agnostic by design.** There is no client, no application programming
+interface (API) key, no vendor library, and no network access anywhere in the
+codebase. `packet.md` is a plain markdown file — paste it into any chat window,
+any local model, any provider. Record which model answered with
+`--model NAME` at ingest time and the run log keeps that provenance, so diffing
+one model's schedule against another's is a first-class operation.
 
 ## Requirements
 
@@ -30,12 +38,18 @@ Send `packet.md` to the model. Paste its entire reply into `output.raw.md` —
 surrounding prose is fine, the fenced JSON block is what gets parsed. Then:
 
 ```bash
-python -m mitss ingest             # parse, validate, constraint-check
-python -m mitss report             # table, timeline, summary
-python -m mitss diff RUN_A RUN_B   # compare two runs of the same plan
-python -m mitss log                # append-only run history
-python -m mitss status             # where things stand
+python -m mitss ingest --model NAME   # parse, validate, constraint-check
+python -m mitss report                # table, timeline, summary
+python -m mitss diff RUN_A RUN_B      # compare two runs of the same plan
+python -m mitss log                   # append-only run history
+python -m mitss status                # where things stand
 ```
+
+`--model NAME` records which model produced the reply (add `--note` for a
+free-text label). Provenance is optional but the harness will remind you when
+it is missing, because a diff between two runs means little if you cannot tell
+which model produced each one. `ingest` also accepts `--file PATH` or `--stdin`
+if it is easier to pipe the reply in than to paste it.
 
 Most commands take a run id, a unique prefix of one, or nothing at all (which
 means the latest run).
@@ -119,7 +133,13 @@ runs/20260811-084500-example-001/
   summary.json    makespan, counts, per-resource utilization
   schedule.csv    spreadsheet export
   issues.json     every error and warning found
+  meta.json       which model answered, plus any note and the ingest time
 ```
+
+Because every run stores its own `plan.json`, the same plan can be sent to
+several different models and each reply ingested into its own run. Comparing
+them is then just `mitss diff RUN_A RUN_B`, and the header names the model on
+each side.
 
 `runs/index.jsonl` is an append-only JSON Lines log — one line per stage and
 ingest event, never rewritten. Run folders can be deleted without losing the
@@ -149,8 +169,8 @@ tests/            unit tests
 python -m unittest discover tests
 ```
 
-42 tests covering validation, every constraint class, output capture from messy
-replies, diffing, rendering, and storage.
+45 tests covering validation, every constraint class, output capture from messy
+replies, diffing, rendering, storage, and the full command-line cycle.
 
 ## Design notes
 

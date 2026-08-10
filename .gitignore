@@ -14,4 +14,7 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+
+# Scratch holding pen for files staged for deletion, and transfer archives
 _to_delete/
+*.tar.gz

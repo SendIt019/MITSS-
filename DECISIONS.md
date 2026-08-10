@@ -93,3 +93,18 @@ including whatever gets pasted in, and do not belong in git history by default.
 
 Reversal note: if run history should be shared or archived, remove the ignore
 rule rather than copying files out.
+
+## 2026-08-10 14:55 EDT — Model provenance recorded per run
+
+Clarified that the model producing schedules is not necessarily the one Jake is
+talking to while building this. The harness was already model-agnostic — no
+client, no key, no vendor library — but runs had no record of *which* model
+answered, which makes a diff between two runs ambiguous.
+
+`ingest` now takes `--model NAME` and `--note TEXT`, stored in the run's
+`meta.json` and echoed into the append-only index. `log`, `report`, and `diff`
+all surface it. Provenance is optional; omitting it prints a reminder rather
+than failing, so a quick run is never blocked.
+
+Consequence: sending one plan to several models and diffing their schedules is
+now a first-class workflow rather than something to reconstruct by memory.

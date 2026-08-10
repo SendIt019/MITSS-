@@ -468,5 +468,100 @@ class Storage(unittest.TestCase):
             self.assertIsNone(store.resolve_run("nope"))
 
 
+GOOD_REPLY = """The model's prose goes here.
+
+```json
+{
+  "session": "s1",
+  "assignments": [
+    {"task_id": "t1", "resource_id": "alpha",
+     "start": "2026-08-11T08:00:00", "end": "2026-08-11T10:00:00"},
+    {"task_id": "t2", "resource_id": "alpha",
+     "start": "2026-08-11T10:00:00", "end": "2026-08-11T11:30:00"},
+    {"task_id": "t3", "resource_id": "alpha",
+     "start": "2026-08-11T11:30:00", "end": "2026-08-11T12:30:00"}
+  ],
+  "unscheduled": [],
+  "rationale": "Sequential chain."
+}
+```
+"""
+
+
+class CommandLine(unittest.TestCase):
+    """End-to-end exercise of the new -> stage -> ingest cycle."""
+
+    def _run(self, argv):
+        import contextlib
+        import io as _io
+
+        from mitss.cli import main
+
+        buffer = _io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = main(argv)
+        return code, buffer.getvalue()
+
+    def test_full_cycle_records_model_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, _ = self._run(["--root", tmp, "new", "s1"])
+            self.assertEqual(code, 0)
+
+            code, out = self._run(["--root", tmp, "stage"])
+            self.assertEqual(code, 0, out)
+
+            store = RunStore(tmp)
+            run_id = store.latest_run()
+            self.assertIsNotNone(run_id)
+            self.assertIsNotNone(store.read_text(run_id, "packet.md"))
+
+            reply_path = os.path.join(tmp, "reply.md")
+            with open(reply_path, "w", encoding="utf-8") as handle:
+                handle.write(GOOD_REPLY)
+
+            code, out = self._run(
+                ["--root", tmp, "ingest", "--file", reply_path,
+                 "--model", "some-other-llm", "--note", "first pass"]
+            )
+            self.assertEqual(code, 0, out)
+
+            meta = store.read_json(run_id, "meta.json")
+            self.assertEqual(meta["model"], "some-other-llm")
+            self.assertEqual(meta["note"], "first pass")
+
+            events = store.read_events()
+            ingest_events = [e for e in events if e["event"] == "ingest"]
+            self.assertEqual(ingest_events[-1]["model"], "some-other-llm")
+            self.assertTrue(ingest_events[-1]["valid"])
+
+            # artifacts written
+            self.assertIsNotNone(store.read_json(run_id, "schedule.json"))
+            self.assertIsNotNone(store.read_json(run_id, "summary.json"))
+            self.assertIsNotNone(store.read_text(run_id, "schedule.csv"))
+
+    def test_illegal_reply_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._run(["--root", tmp, "new", "s1"])
+            self._run(["--root", tmp, "stage"])
+            reply_path = os.path.join(tmp, "bad.md")
+            with open(reply_path, "w", encoding="utf-8") as handle:
+                handle.write(GOOD_REPLY.replace("2026-08-11T10:00:00", "2026-08-11T09:00:00"))
+            code, out = self._run(["--root", tmp, "ingest", "--file", reply_path,
+                                   "--model", "some-other-llm"])
+            self.assertEqual(code, 1)
+            self.assertIn("duration_mismatch", out)
+
+    def test_missing_model_is_flagged_but_not_fatal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._run(["--root", tmp, "new", "s1"])
+            self._run(["--root", tmp, "stage"])
+            reply_path = os.path.join(tmp, "reply.md")
+            with open(reply_path, "w", encoding="utf-8") as handle:
+                handle.write(GOOD_REPLY)
+            code, out = self._run(["--root", tmp, "ingest", "--file", reply_path])
+            self.assertEqual(code, 0)
+            self.assertIn("no model recorded", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
