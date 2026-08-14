@@ -15,6 +15,7 @@ through the provider harness in mitss.llm.
 from .compare import build_matrix, compare_runs, diff_text
 from .models import (
     ACCURATE,
+    InputSet,
     INACCURATE,
     PARTIAL,
     UNRATED,
@@ -26,11 +27,14 @@ from .models import (
     is_verdict,
     slugify,
 )
+from .render import PLACEHOLDER, has_placeholder, preview, render_prompt
 from .store import NotFound, Store
 
 __all__ = [
     "ACCURATE",
     "INACCURATE",
+    "InputSet",
+    "PLACEHOLDER",
     "NotFound",
     "PARTIAL",
     "Prompt",
@@ -43,6 +47,9 @@ __all__ = [
     "build_matrix",
     "compare_runs",
     "diff_text",
+    "has_placeholder",
     "is_verdict",
+    "preview",
+    "render_prompt",
     "slugify",
 ]

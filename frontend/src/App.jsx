@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from './api'
 import DiffText, { DiffLegend } from './components/DiffText'
+import Inputs from './components/Inputs'
 import Matrix from './components/Matrix'
 import {
   Card, CopyButton, Dropzone, Empty, Field, Stat, Tabs, Verdict, VerdictPicker,
-  timeAgo, verdictMeta,
+  timeAgo,
 } from './components/Panels'
 
 const SAMPLE = `You are extracting structured facts from an incident report.
@@ -19,7 +20,7 @@ Return the events in the order they occurred. If a detail is not stated
 in the report, write "not stated" rather than inferring it.
 
 REPORT:
-{paste the report here}`
+{input}`
 
 export default function App() {
   const [prompts, setPrompts] = useState([])
@@ -28,8 +29,13 @@ export default function App() {
   const [versionNote, setVersionNote] = useState('')
   const [viewVersion, setViewVersion] = useState(null)
 
+  const [inputs, setInputs] = useState([])
+  const [inputId, setInputId] = useState('')
+  const [rendered, setRendered] = useState(null)
+
   const [runs, setRuns] = useState([])
   const [matrix, setMatrix] = useState(null)
+  const [matrixInput, setMatrixInput] = useState('')
   const [openRun, setOpenRun] = useState(null)
 
   const [outputText, setOutputText] = useState('')
@@ -46,7 +52,7 @@ export default function App() {
   const [error, setError] = useState('')
   const [flash, setFlash] = useState('')
 
-  const guard = async (work) => {
+  const guard = useCallback(async (work) => {
     setBusy(true)
     setError('')
     try {
@@ -57,7 +63,7 @@ export default function App() {
     } finally {
       setBusy(false)
     }
-  }
+  }, [])
 
   const say = (message) => {
     setFlash(message)
@@ -69,10 +75,16 @@ export default function App() {
     if (body) setPrompts(body.prompts)
   }, [])
 
+  const refreshInputs = useCallback(async () => {
+    const body = await api.inputs().catch(() => null)
+    if (body) setInputs(body.inputs)
+  }, [])
+
   useEffect(() => {
     api.llm().then(setLlm).catch(() => setLlm(null))
     refreshPrompts()
-  }, [refreshPrompts])
+    refreshInputs()
+  }, [refreshPrompts, refreshInputs])
 
   const loadPrompt = useCallback(async (id, version) => {
     const detail = await api.prompt(id, version)
@@ -87,6 +99,7 @@ export default function App() {
     ])
     setRuns(runsBody.runs)
     setMatrix(grid)
+    setMatrixInput('')
     setOpenRun(null)
     setComparison(null)
     setCompareA('')
@@ -97,6 +110,19 @@ export default function App() {
   const refreshCurrent = useCallback(async () => {
     if (prompt) await loadPrompt(prompt.id, viewVersion || undefined)
   }, [prompt, viewVersion, loadPrompt])
+
+  // The rendered prompt is what actually gets sent, so it is recomputed
+  // whenever the version or the chosen input changes — and it is what the
+  // copy button copies. Copying the template while running the rendered text
+  // would be the worst possible bug in a tool built on provenance.
+  useEffect(() => {
+    if (!prompt || viewVersion == null) { setRendered(null); return }
+    let cancelled = false
+    api.preview(prompt.id, viewVersion, inputId)
+      .then((body) => { if (!cancelled) setRendered(body) })
+      .catch(() => { if (!cancelled) setRendered(null) })
+    return () => { cancelled = true }
+  }, [prompt, viewVersion, inputId])
 
   // -- prompt actions --------------------------------------------------
 
@@ -109,13 +135,13 @@ export default function App() {
       say('New prompt created')
     })
 
-  const onUpload = (file, intoCurrent) =>
+  const onUpload = (file) =>
     guard(async () => {
-      const body = await api.upload(file, intoCurrent && prompt ? prompt.id : '')
+      const body = await api.upload(file, '')
       await refreshPrompts()
       await loadPrompt(body.id)
       setTab('prompt')
-      say(intoCurrent ? 'Saved as a new version' : 'Prompt created from file')
+      say('Prompt created from file')
     })
 
   const onSaveVersion = () =>
@@ -144,6 +170,7 @@ export default function App() {
         output: outputText,
         notes: runNotes,
         verdict: 'unrated',
+        input_id: inputId,
       })
       setOutputText('')
       setRunNotes('')
@@ -158,7 +185,7 @@ export default function App() {
       const updated = await api.review(runId, verdict, notes)
       setOpenRun(updated)
       const [runsBody, grid] = await Promise.all([
-        api.runs(prompt.id), api.matrix(prompt.id),
+        api.runs(prompt.id), api.matrix(prompt.id, matrixInput || undefined),
       ])
       setRuns(runsBody.runs)
       setMatrix(grid)
@@ -180,18 +207,21 @@ export default function App() {
     })
 
   const onCompare = () =>
-    guard(async () => {
-      const body = await api.compare(compareA, compareB)
-      setComparison(body)
-    })
+    guard(async () => setComparison(await api.compare(compareA, compareB)))
 
   const onGenerate = () =>
     guard(async () => {
-      const run = await api.generate(prompt.id, viewVersion, modelName)
+      const run = await api.generate(prompt.id, viewVersion, modelName, inputId)
       await refreshCurrent()
       setOpenRun(run)
       setTab('runs')
       say('Output fetched from your model')
+    })
+
+  const onMatrixInput = (value) =>
+    guard(async () => {
+      setMatrixInput(value)
+      setMatrix(await api.matrix(prompt.id, value || undefined))
     })
 
   // -- derived ---------------------------------------------------------
@@ -200,9 +230,10 @@ export default function App() {
   const dirty = prompt && draft !== currentText
   const tally = matrix?.totals
   const unreviewed = runs.filter((r) => r.verdict === 'unrated').length
+  const chosenInput = inputs.find((i) => i.id === inputId)
 
   const runLabel = (run) =>
-    `v${run.version} · ${run.model || 'unnamed'} · ${timeAgo(run.created_at)}`
+    `v${run.version} · ${run.model || 'unnamed'}${run.input_name ? ` · ${run.input_name}` : ''} · ${timeAgo(run.created_at)}`
 
   const compareOptions = useMemo(
     () => runs.map((r) => ({ id: r.id, label: runLabel(r) })), [runs])
@@ -254,17 +285,13 @@ export default function App() {
           )}
 
           <div className="side-drop">
-            <Dropzone onFile={(file) => onUpload(file, false)} busy={busy}
-                      label="Drop a .txt prompt" />
+            <Dropzone onFile={onUpload} busy={busy} label="Drop a .txt prompt" />
           </div>
         </aside>
 
         <main className="main">
           {!prompt ? (
-            <Card
-              title="Start here"
-              hint="Create a prompt, or drop a .txt file into the panel on the left."
-            >
+            <Card title="Start here" hint="Create a prompt, or drop a .txt file into the panel on the left.">
               <button className="primary" onClick={onNewPrompt} disabled={busy}>
                 New prompt
               </button>
@@ -297,6 +324,7 @@ export default function App() {
                 onChange={setTab}
                 items={[
                   { value: 'prompt', label: 'Prompt' },
+                  { value: 'inputs', label: 'Inputs', badge: inputs.length || null },
                   { value: 'runs', label: 'Outputs', badge: runs.length || null },
                   { value: 'matrix', label: 'Matrix' },
                   { value: 'compare', label: 'Compare' },
@@ -309,20 +337,17 @@ export default function App() {
                     title={`Version ${viewVersion ?? '—'}${dirty ? ' (edited)' : ''}`}
                     hint="Editing never overwrites a version. Saving creates the next one, so every recorded output stays tied to the exact text that produced it."
                     right={
-                      <div className="row">
-                        <select
-                          value={viewVersion ?? ''}
-                          onChange={(event) =>
-                            guard(() => loadPrompt(prompt.id, Number(event.target.value)))}
-                        >
-                          {prompt.versions.map((v) => (
-                            <option key={v.version} value={v.version}>
-                              v{v.version}{v.note ? ` — ${v.note}` : ''}
-                            </option>
-                          ))}
-                        </select>
-                        <CopyButton text={draft} />
-                      </div>
+                      <select
+                        value={viewVersion ?? ''}
+                        onChange={(event) =>
+                          guard(() => loadPrompt(prompt.id, Number(event.target.value)))}
+                      >
+                        {prompt.versions.map((v) => (
+                          <option key={v.version} value={v.version}>
+                            v{v.version}{v.note ? ` — ${v.note}` : ''}
+                          </option>
+                        ))}
+                      </select>
                     }
                   >
                     <textarea
@@ -346,23 +371,53 @@ export default function App() {
                     </div>
                     {!dirty && (
                       <p className="hint" style={{ marginTop: 8, marginBottom: 0 }}>
-                        No unsaved changes.
+                        No unsaved changes.{' '}
+                        {!rendered?.has_placeholder && (
+                          <>Add <code>{'{input}'}</code> where an input set should be dropped in.</>
+                        )}
                       </p>
                     )}
                   </Card>
 
                   <Card
-                    title="Record an output"
-                    hint="Copy the prompt above, run it through your model, then paste what came back."
+                    title="Run it"
+                    hint="Pick an input, copy the rendered prompt below, run it through your model, then paste the output back."
                     right={
-                      llm?.available ? (
-                        <button onClick={onGenerate} disabled={busy}>
-                          Fetch from {llm.provider}
-                        </button>
-                      ) : null
+                      <div className="row">
+                        <select value={inputId} onChange={(event) => setInputId(event.target.value)}>
+                          <option value="">no input</option>
+                          {inputs.map((entry) => (
+                            <option key={entry.id} value={entry.id}>{entry.name}</option>
+                          ))}
+                        </select>
+                        <CopyButton text={rendered?.rendered || draft} label="Copy prompt" />
+                      </div>
                     }
                   >
-                    <div className="row">
+                    {rendered?.notes?.length > 0 && (
+                      <div className="issues" style={{ marginBottom: 12 }}>
+                        {rendered.notes.map((note) => (
+                          <div className={`issue ${note.severity}`} key={note.code}>
+                            <span className="sev">{note.severity}</span>
+                            <span className="where">render</span>
+                            <span>{note.message}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <details className="fold" open={!!inputId}>
+                      <summary>
+                        Rendered prompt — what will actually be sent
+                        {rendered && (
+                          <span className="muted"> · {rendered.words} words</span>
+                        )}
+                        {chosenInput && <span className="muted"> · {chosenInput.name}</span>}
+                      </summary>
+                      <DiffText plain={rendered?.rendered || draft} />
+                    </details>
+
+                    <div className="row" style={{ marginTop: 12 }}>
                       <Field label="Model">
                         <input
                           type="text"
@@ -379,7 +434,13 @@ export default function App() {
                           placeholder="temperature 0, second attempt…"
                         />
                       </Field>
+                      {llm?.available && (
+                        <button onClick={onGenerate} disabled={busy}>
+                          Fetch from {llm.provider}
+                        </button>
+                      )}
                     </div>
+
                     <label className="field" style={{ marginTop: 10 }}>Output</label>
                     <textarea
                       className="output-input"
@@ -403,14 +464,14 @@ export default function App() {
                 </>
               )}
 
+              {tab === 'inputs' && (
+                <Inputs inputs={inputs} onChanged={refreshInputs} busy={busy} guard={guard} />
+              )}
+
               {tab === 'runs' && (
                 <RunsTab
-                  runs={runs}
-                  openRun={openRun}
-                  onOpenRun={onOpenRun}
-                  onReview={onReview}
-                  onDelete={onDeleteRun}
-                  busy={busy}
+                  runs={runs} openRun={openRun} onOpenRun={onOpenRun}
+                  onReview={onReview} onDelete={onDeleteRun} busy={busy}
                   runLabel={runLabel}
                 />
               )}
@@ -419,7 +480,22 @@ export default function App() {
                 <Card
                   title="Versions against models"
                   hint="Each cell shows the worst verdict recorded for that pairing. Click one to read it."
+                  right={
+                    <select value={matrixInput} onChange={(event) => onMatrixInput(event.target.value)}>
+                      <option value="">all inputs</option>
+                      {(matrix?.available_inputs || []).filter((i) => i.id).map((entry) => (
+                        <option key={entry.id} value={entry.id}>{entry.name}</option>
+                      ))}
+                    </select>
+                  }
                 >
+                  {matrix && !matrix.like_for_like && (
+                    <div className="banner info" style={{ marginBottom: 14 }}>
+                      This grid mixes {matrix.inputs_in_view.length} different inputs, so
+                      versions are not being compared like for like. Pick a single input
+                      above to compare wording fairly.
+                    </div>
+                  )}
                   {tally && tally.total > 0 && (
                     <div className="tiles" style={{ marginBottom: 16 }}>
                       <Stat label="Outputs" value={tally.total} />
@@ -431,6 +507,11 @@ export default function App() {
                   )}
                   <Matrix matrix={matrix} onPick={onOpenRun}
                           selected={openRun ? [openRun.id] : []} />
+                  {matrix?.missing?.length > 0 && (
+                    <p className="hint" style={{ marginTop: 12, marginBottom: 0 }}>
+                      Never run: {matrix.missing.map((m) => `v${m.version}/${m.model}`).join(', ')}
+                    </p>
+                  )}
                 </Card>
               )}
 
@@ -439,9 +520,7 @@ export default function App() {
                   options={compareOptions}
                   a={compareA} b={compareB}
                   setA={setCompareA} setB={setCompareB}
-                  onCompare={onCompare}
-                  comparison={comparison}
-                  busy={busy}
+                  onCompare={onCompare} comparison={comparison} busy={busy}
                 />
               )}
             </>
@@ -458,11 +537,7 @@ function RunsTab({ runs, openRun, onOpenRun, onReview, onDelete, busy, runLabel 
   useEffect(() => { setNotesDraft(openRun?.notes || '') }, [openRun?.id])
 
   if (runs.length === 0) {
-    return (
-      <Card title="Outputs">
-        <Empty>Nothing recorded for this prompt yet.</Empty>
-      </Card>
-    )
+    return <Card title="Outputs"><Empty>Nothing recorded for this prompt yet.</Empty></Card>
   }
 
   return (
@@ -493,6 +568,12 @@ function RunsTab({ runs, openRun, onOpenRun, onReview, onDelete, busy, runLabel 
             </button>
           }
         >
+          {openRun.input_name && (
+            <p className="hint" style={{ marginTop: 0 }}>
+              Input: <strong>{openRun.input_name}</strong>
+            </p>
+          )}
+
           <VerdictPicker
             value={openRun.verdict}
             disabled={busy}
@@ -519,6 +600,13 @@ function RunsTab({ runs, openRun, onOpenRun, onReview, onDelete, busy, runLabel 
             <summary>The exact prompt that produced this</summary>
             <DiffText plain={openRun.prompt_text} />
           </details>
+
+          {openRun.input_text && (
+            <details className="fold">
+              <summary>The input it was given</summary>
+              <DiffText plain={openRun.input_text} />
+            </details>
+          )}
         </Card>
       )}
     </>
@@ -536,7 +624,7 @@ function CompareTab({ options, a, b, setA, setB, onCompare, comparison, busy }) 
 
   return (
     <>
-      <Card title="Compare two outputs" hint="Any two runs of this prompt — different versions, different models, or the same pairing twice.">
+      <Card title="Compare two outputs" hint="Any two runs of this prompt — different versions, different models, different inputs.">
         <div className="row">
           <Field label="Left">
             <select value={a} onChange={(event) => setA(event.target.value)}>
@@ -570,6 +658,14 @@ function CompareTab({ options, a, b, setA, setB, onCompare, comparison, busy }) 
             </div>
           }
         >
+          {comparison.left.input_id !== comparison.right.input_id && (
+            <div className="banner info">
+              These ran on different inputs
+              ({comparison.left.input_name || 'no input'} against{' '}
+              {comparison.right.input_name || 'no input'}), so the outputs are not
+              directly comparable.
+            </div>
+          )}
           <DiffLegend diff={comparison.output_diff} />
           <div className="side-by-side">
             <div>

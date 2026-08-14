@@ -113,12 +113,54 @@ class Prompt:
 
 
 @dataclass
-class Run:
-    """One trip through the harness: a prompt version, a model, an output.
+class InputSet:
+    """Named material a prompt gets applied to.
 
-    `prompt_text` is frozen into the run rather than looked up later. If a
-    prompt version were ever lost or moved, the run still shows exactly what
-    was sent.
+    Kept separate from the prompt so that version history tracks wording rather
+    than whichever document happened to be pasted in that day. Reusable, so the
+    same test case can be run against every version.
+    """
+
+    id: str
+    name: str
+    text: str = ""
+    note: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+    @property
+    def characters(self) -> int:
+        return len(self.text)
+
+    @property
+    def words(self) -> int:
+        return len(self.text.split())
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "note": self.note,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "characters": self.characters,
+            "words": self.words,
+        }
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = self.summary()
+        data["text"] = self.text
+        return data
+
+
+@dataclass
+class Run:
+    """One trip through the harness: a prompt version, an input, a model, an output.
+
+    Three texts are frozen into the run rather than looked up later:
+    `template_text` (the prompt version's wording), `input_text` (the material)
+    and `prompt_text` (what those two rendered into, which is what was actually
+    sent). Editing a prompt or an input afterwards cannot rewrite history.
     """
 
     id: str
@@ -126,7 +168,11 @@ class Run:
     version: int
     model: str = ""
     output: str = ""
-    prompt_text: str = ""
+    prompt_text: str = ""          # the rendered prompt, exactly as sent
+    template_text: str = ""        # the prompt version it came from
+    input_id: str = ""
+    input_name: str = ""
+    input_text: str = ""
     verdict: str = UNRATED
     notes: str = ""
     created_at: str = ""
@@ -139,12 +185,14 @@ class Run:
         return len(self.output.split())
 
     def summary(self) -> Dict[str, Any]:
-        """Everything except the two big text blobs."""
+        """Everything except the big text blobs."""
         return {
             "id": self.id,
             "prompt_id": self.prompt_id,
             "version": self.version,
             "model": self.model,
+            "input_id": self.input_id,
+            "input_name": self.input_name,
             "verdict": self.verdict,
             "verdict_label": VERDICT_LABELS.get(self.verdict, self.verdict),
             "notes": self.notes,
@@ -160,6 +208,8 @@ class Run:
         data = self.summary()
         data["output"] = self.output
         data["prompt_text"] = self.prompt_text
+        data["template_text"] = self.template_text
+        data["input_text"] = self.input_text
         return data
 
     @classmethod

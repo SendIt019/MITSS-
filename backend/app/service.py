@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from mitss.llm import LLMError, ProviderUnavailable, get_provider
 from pipeline import NotFound, Store, build_matrix, compare_runs, diff_text
 from pipeline.models import UNRATED, VERDICT_LABELS, VERDICTS, is_verdict
+from pipeline.render import preview as render_preview, render_prompt
 
 BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -68,7 +69,70 @@ def prompt_detail(prompt_id: str, version: Optional[int] = None,
     data["selected_version"] = selected.to_dict() if selected else None
     data["run_count"] = len(runs)
     data["models"] = shelf.models_used(prompt_id)
+    data["inputs_used"] = shelf.inputs_used(prompt_id)
+    data["has_placeholder"] = "{input}" in (selected.text if selected else "")
     return data
+
+
+# --------------------------------------------------------------------------
+# input sets
+# --------------------------------------------------------------------------
+
+def list_inputs(root: Optional[str] = None) -> List[Dict[str, Any]]:
+    return [i.summary() for i in store(root).list_inputs()]
+
+
+def create_input(name: str, text: str, note: str = "",
+                 root: Optional[str] = None) -> Dict[str, Any]:
+    if not (text or "").strip():
+        raise ServiceError("the input is empty")
+    return store(root).create_input(name.strip() or "untitled input", text, note).to_dict()
+
+
+def get_input(input_id: str, root: Optional[str] = None) -> Dict[str, Any]:
+    return _found(store(root).get_input, input_id).to_dict()
+
+
+def update_input(input_id: str, name: Optional[str] = None, text: Optional[str] = None,
+                 note: Optional[str] = None, root: Optional[str] = None) -> Dict[str, Any]:
+    if text is not None and not text.strip():
+        raise ServiceError("the input is empty")
+    return _found(store(root).update_input, input_id, name, text, note).to_dict()
+
+
+def delete_input(input_id: str, root: Optional[str] = None) -> Dict[str, Any]:
+    _found(store(root).delete_input, input_id)
+    return {"deleted": input_id}
+
+
+def upload_input(filename: str, text: str, root: Optional[str] = None) -> Dict[str, Any]:
+    if not (text or "").strip():
+        raise ServiceError("the uploaded file is empty")
+    name = os.path.splitext(os.path.basename(filename or "input.txt"))[0]
+    return create_input(name, text, f"uploaded {filename}", root=root)
+
+
+def preview_prompt(prompt_id: str, version: Optional[int] = None,
+                   input_id: str = "", root: Optional[str] = None) -> Dict[str, Any]:
+    """What would actually be sent, given this version and this input."""
+    shelf = store(root)
+    prompt = _found(shelf.get_prompt, prompt_id)
+    selected = prompt.version(version) if version is not None else prompt.latest
+    if selected is None:
+        raise ServiceError(f"prompt '{prompt_id}' has no version {version}", 404)
+
+    input_text = ""
+    input_name = ""
+    if input_id:
+        input_set = _found(shelf.get_input, input_id)
+        input_text = input_set.text
+        input_name = input_set.name
+
+    payload = render_preview(selected.text, input_text)
+    payload["version"] = selected.version
+    payload["input_id"] = input_id
+    payload["input_name"] = input_name
+    return payload
 
 
 def add_version(prompt_id: str, text: str, note: str = "",
@@ -114,7 +178,7 @@ def upload_prompt(filename: str, text: str, prompt_id: Optional[str] = None,
 # --------------------------------------------------------------------------
 
 def record_run(prompt_id: str, version: Optional[int], model: str, output: str,
-               notes: str = "", verdict: str = UNRATED,
+               notes: str = "", verdict: str = UNRATED, input_id: str = "",
                root: Optional[str] = None) -> Dict[str, Any]:
     if not (output or "").strip():
         raise ServiceError("the output is empty")
@@ -128,7 +192,7 @@ def record_run(prompt_id: str, version: Optional[int], model: str, output: str,
         raise ServiceError(f"prompt '{prompt_id}' has no versions", 409)
 
     run = _found(shelf.create_run, prompt_id, target, model.strip(), output,
-                 notes, verdict)
+                 notes, verdict, "paste", None, input_id)
     return run.to_dict()
 
 
@@ -137,8 +201,10 @@ def run_detail(run_id: str, root: Optional[str] = None) -> Dict[str, Any]:
 
 
 def list_runs(prompt_id: Optional[str] = None, version: Optional[int] = None,
-              model: Optional[str] = None, root: Optional[str] = None) -> List[Dict[str, Any]]:
-    return [r.summary() for r in store(root).list_runs(prompt_id, version, model)]
+              model: Optional[str] = None, input_id: Optional[str] = None,
+              root: Optional[str] = None) -> List[Dict[str, Any]]:
+    return [r.summary()
+            for r in store(root).list_runs(prompt_id, version, model, input_id)]
 
 
 def review_run(run_id: str, verdict: Optional[str] = None,
@@ -154,7 +220,7 @@ def delete_run(run_id: str, root: Optional[str] = None) -> Dict[str, Any]:
 
 
 def generate_run(prompt_id: str, version: Optional[int] = None, model: str = "",
-                 root: Optional[str] = None) -> Dict[str, Any]:
+                 input_id: str = "", root: Optional[str] = None) -> Dict[str, Any]:
     """Send the prompt to the configured provider and record what comes back.
 
     With the default manual provider this reports a conflict, which is the
@@ -169,10 +235,15 @@ def generate_run(prompt_id: str, version: Optional[int] = None, model: str = "",
     if prompt_version is None:
         raise ServiceError(f"prompt '{prompt_id}' has no version {target}", 404)
 
+    input_text = ""
+    if input_id:
+        input_text = _found(shelf.get_input, input_id).text
+    rendered, _ = render_prompt(prompt_version.text, input_text)
+
     provider = get_provider()
     started = time.monotonic()
     try:
-        output = provider.complete(prompt_version.text)
+        output = provider.complete(rendered)
     except ProviderUnavailable as exc:
         raise ServiceError(str(exc), 409) from None
     except LLMError as exc:
@@ -181,7 +252,7 @@ def generate_run(prompt_id: str, version: Optional[int] = None, model: str = "",
 
     label = model or provider.describe().get("model") or provider.name
     run = shelf.create_run(prompt_id, target, label, output, source="provider",
-                           duration_ms=elapsed)
+                           duration_ms=elapsed, input_id=input_id)
     return run.to_dict()
 
 
@@ -189,14 +260,24 @@ def generate_run(prompt_id: str, version: Optional[int] = None, model: str = "",
 # comparison
 # --------------------------------------------------------------------------
 
-def matrix(prompt_id: str, root: Optional[str] = None) -> Dict[str, Any]:
+def matrix(prompt_id: str, input_id: Optional[str] = None,
+           root: Optional[str] = None) -> Dict[str, Any]:
+    """Versions against models, optionally narrowed to one input set.
+
+    `input_id=None` aggregates every input, which is fine for a coverage
+    overview but is not a like-for-like comparison. Pass an input id to compare
+    wording fairly.
+    """
     shelf = store(root)
     prompt = _found(shelf.get_prompt, prompt_id)
-    runs = shelf.list_runs(prompt_id=prompt_id)
+    runs = shelf.list_runs(prompt_id=prompt_id, input_id=input_id)
     versions = [v.version for v in prompt.versions]
     payload = build_matrix(runs, versions)
     payload["prompt"] = prompt.summary()
     payload["version_notes"] = {v.version: v.note for v in prompt.versions}
+    payload["input_id"] = input_id
+    payload["available_inputs"] = shelf.inputs_used(prompt_id)
+    payload["like_for_like"] = input_id is not None or len(payload["inputs_in_view"]) <= 1
     return payload
 
 

@@ -27,7 +27,8 @@ import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from .models import Prompt, PromptVersion, Run, UNRATED, slugify
+from .models import InputSet, Prompt, PromptVersion, Run, UNRATED, slugify
+from .render import render_prompt
 
 INDEX_NAME = "index.jsonl"
 
@@ -50,11 +51,13 @@ class Store:
         self.data_dir = os.path.join(self.root, "data")
         self.prompts_dir = os.path.join(self.data_dir, "prompts")
         self.runs_dir = os.path.join(self.data_dir, "runs")
+        self.inputs_dir = os.path.join(self.data_dir, "inputs")
         self.ensure()
 
     def ensure(self) -> None:
         os.makedirs(self.prompts_dir, exist_ok=True)
         os.makedirs(self.runs_dir, exist_ok=True)
+        os.makedirs(self.inputs_dir, exist_ok=True)
 
     # -- low level -------------------------------------------------------
 
@@ -192,6 +195,108 @@ class Store:
         out.sort(key=lambda p: p.summary()["updated_at"] or "", reverse=True)
         return out
 
+    # -- input sets ------------------------------------------------------
+
+    def input_dir(self, input_id: str) -> str:
+        return os.path.join(self.inputs_dir, input_id)
+
+    def list_input_ids(self) -> List[str]:
+        if not os.path.isdir(self.inputs_dir):
+            return []
+        return sorted(
+            name for name in os.listdir(self.inputs_dir)
+            if os.path.isdir(os.path.join(self.inputs_dir, name))
+        )
+
+    def unique_input_id(self, name: str) -> str:
+        base = slugify(name, "input")
+        candidate = base
+        counter = 2
+        while os.path.exists(self.input_dir(candidate)):
+            candidate = f"{base}-{counter}"
+            counter += 1
+        return candidate
+
+    def create_input(self, name: str, text: str, note: str = "") -> InputSet:
+        input_id = self.unique_input_id(name)
+        created = now()
+        self._write_text(os.path.join(self.input_dir(input_id), "input.txt"), text)
+        self._write_json(
+            os.path.join(self.input_dir(input_id), "input.json"),
+            {"id": input_id, "name": name or input_id, "note": note,
+             "created_at": created, "updated_at": created},
+        )
+        self.append_event({"event": "input_created", "input_id": input_id,
+                           "name": name or input_id, "characters": len(text)})
+        return self.get_input(input_id)
+
+    def get_input(self, input_id: str) -> InputSet:
+        meta = self._read_json(os.path.join(self.input_dir(input_id), "input.json"))
+        if meta is None:
+            raise NotFound(f"no input '{input_id}'")
+        text = self._read_text(os.path.join(self.input_dir(input_id), "input.txt")) or ""
+        return InputSet(
+            id=meta["id"],
+            name=meta.get("name", meta["id"]),
+            text=text,
+            note=meta.get("note", ""),
+            created_at=meta.get("created_at", ""),
+            updated_at=meta.get("updated_at", meta.get("created_at", "")),
+        )
+
+    def update_input(self, input_id: str, name: Optional[str] = None,
+                     text: Optional[str] = None, note: Optional[str] = None) -> InputSet:
+        """Inputs are editable — unlike prompt versions.
+
+        Safe because every run freezes the input text it used, so editing an
+        input cannot rewrite what a past run was actually given.
+        """
+        path = os.path.join(self.input_dir(input_id), "input.json")
+        meta = self._read_json(path)
+        if meta is None:
+            raise NotFound(f"no input '{input_id}'")
+        if name is not None:
+            meta["name"] = name
+        if note is not None:
+            meta["note"] = note
+        meta["updated_at"] = now()
+        self._write_json(path, meta)
+        if text is not None:
+            self._write_text(os.path.join(self.input_dir(input_id), "input.txt"), text)
+        self.append_event({"event": "input_updated", "input_id": input_id})
+        return self.get_input(input_id)
+
+    def delete_input(self, input_id: str) -> None:
+        directory = self.input_dir(input_id)
+        if not os.path.isdir(directory):
+            raise NotFound(f"no input '{input_id}'")
+        for name in os.listdir(directory):
+            os.remove(os.path.join(directory, name))
+        os.rmdir(directory)
+        self.append_event({"event": "input_deleted", "input_id": input_id})
+
+    def list_inputs(self) -> List[InputSet]:
+        out = []
+        for input_id in self.list_input_ids():
+            try:
+                out.append(self.get_input(input_id))
+            except NotFound:
+                continue
+        out.sort(key=lambda i: i.updated_at or "", reverse=True)
+        return out
+
+    def inputs_used(self, prompt_id: Optional[str] = None) -> List[Dict[str, str]]:
+        """Inputs that actually appear in runs, in first-seen order."""
+        seen: List[Dict[str, str]] = []
+        keys = set()
+        for run in self.list_runs(prompt_id=prompt_id):
+            key = run.input_id or ""
+            if key in keys:
+                continue
+            keys.add(key)
+            seen.append({"id": key, "name": run.input_name or "no input"})
+        return seen
+
     # -- runs ------------------------------------------------------------
 
     def run_dir(self, run_id: str) -> str:
@@ -216,11 +321,17 @@ class Store:
 
     def create_run(self, prompt_id: str, version: int, model: str, output: str,
                    notes: str = "", verdict: str = UNRATED, source: str = "paste",
-                   duration_ms: Optional[int] = None) -> Run:
+                   duration_ms: Optional[int] = None,
+                   input_id: str = "") -> Run:
         prompt = self.get_prompt(prompt_id)
         prompt_version = prompt.version(version)
         if prompt_version is None:
             raise NotFound(f"prompt '{prompt_id}' has no version {version}")
+
+        input_set = self.get_input(input_id) if input_id else None
+        rendered, _ = render_prompt(
+            prompt_version.text, input_set.text if input_set else ""
+        )
 
         run_id = self.unique_run_id(prompt_id, version)
         run = Run(
@@ -229,7 +340,11 @@ class Store:
             version=version,
             model=model,
             output=output,
-            prompt_text=prompt_version.text,
+            prompt_text=rendered,
+            template_text=prompt_version.text,
+            input_id=input_set.id if input_set else "",
+            input_name=input_set.name if input_set else "",
+            input_text=input_set.text if input_set else "",
             verdict=verdict,
             notes=notes,
             created_at=now(),
@@ -240,7 +355,8 @@ class Store:
         self.append_event({
             "event": "run_recorded", "run_id": run_id, "prompt_id": prompt_id,
             "version": version, "model": model, "verdict": verdict,
-            "source": source, "output_characters": len(output),
+            "input_id": run.input_id, "source": source,
+            "output_characters": len(output),
         })
         return run
 
@@ -248,9 +364,10 @@ class Store:
         directory = self.run_dir(run.id)
         os.makedirs(directory, exist_ok=True)
         self._write_text(os.path.join(directory, "prompt.txt"), run.prompt_text)
+        self._write_text(os.path.join(directory, "template.txt"), run.template_text)
+        self._write_text(os.path.join(directory, "input.txt"), run.input_text)
         self._write_text(os.path.join(directory, "output.txt"), run.output)
-        payload = run.summary()
-        self._write_json(os.path.join(directory, "run.json"), payload)
+        self._write_json(os.path.join(directory, "run.json"), run.summary())
 
     def get_run(self, run_id: str) -> Run:
         directory = self.run_dir(run_id)
@@ -260,11 +377,17 @@ class Store:
         run = Run.from_dict(meta)
         run.output = self._read_text(os.path.join(directory, "output.txt")) or ""
         run.prompt_text = self._read_text(os.path.join(directory, "prompt.txt")) or ""
+        # Older runs predate these files; fall back to the rendered prompt.
+        run.template_text = (
+            self._read_text(os.path.join(directory, "template.txt")) or run.prompt_text
+        )
+        run.input_text = self._read_text(os.path.join(directory, "input.txt")) or ""
         return run
 
     def list_runs(self, prompt_id: Optional[str] = None,
                   version: Optional[int] = None,
-                  model: Optional[str] = None) -> List[Run]:
+                  model: Optional[str] = None,
+                  input_id: Optional[str] = None) -> List[Run]:
         runs = []
         for run_id in self.list_run_ids():
             try:
@@ -276,6 +399,8 @@ class Store:
             if version is not None and run.version != version:
                 continue
             if model and run.model != model:
+                continue
+            if input_id is not None and run.input_id != input_id:
                 continue
             runs.append(run)
         runs.sort(key=lambda r: r.created_at or "", reverse=True)

@@ -34,13 +34,42 @@ Requirements: Python 3.9 or newer, Node 18 or newer.
 
 ## The cycle
 
-Create a prompt, or drop a `.txt` file in. Copy it, run it through your model,
-and paste the output back with the model's name on it. Read the output and set
-a verdict — accurate, partly right, or inaccurate — plus any note.
+Create a prompt, or drop a `.txt` file in. Put `{input}` where the material
+goes. Pick an input set, copy the **rendered** prompt, run it through your
+model, and paste the output back with the model's name on it. Read the output
+and set a verdict — accurate, partly right, or inaccurate — plus any note.
 
 Then edit the prompt. Saving does not overwrite: it creates the next version,
 so every output stays tied to the exact text that produced it. Run the new
-version, record that output too, and the matrix fills in.
+version on the same input, record that output too, and the matrix fills in.
+
+## Prompts and inputs are separate
+
+A prompt version is the **wording** you are tuning. An input set is the
+**material** it gets applied to. Keeping them apart is what makes the version
+history mean anything: v1 against v2 on the same input is a fair test of
+wording, and one input run across every version answers whether a rewrite
+actually helped.
+
+```text
+PROMPT v2                     INPUT "Acme incident"
+  Extract entities from         Acme Corp confirmed the
+  the passage.                  outage on 4 March 2026...
+  PASSAGE:
+  {input}
+                    ↓ rendered ↓
+  Extract entities from the passage.
+  PASSAGE:
+  Acme Corp confirmed the outage on 4 March 2026...
+```
+
+The copy button copies the rendered prompt, never the template. Inputs are
+editable, unlike prompt versions — safe because each run freezes the template,
+the input and the rendered result separately, so editing an input later cannot
+rewrite what a past run was given.
+
+If a prompt has no `{input}` placeholder, a chosen input is appended at the end
+with a warning rather than silently dropped.
 
 ## Versions are immutable
 
@@ -60,6 +89,11 @@ The **matrix** puts prompt versions down the side and models across the top.
 Each cell shows the worst verdict recorded for that pairing — a model that got
 it wrong once is the thing worth noticing, even if a retry passed. Click a cell
 to read the output behind it.
+
+Filter it to a single input set to compare wording fairly. Left on "all
+inputs" it still renders, which is useful for coverage, but it says plainly
+that it is mixing inputs and is therefore not a like-for-like comparison. It
+also lists version and model pairings that have never been run.
 
 **Compare** puts any two outputs side by side with a word-level difference
 highlight. Word-level matters: a line diff on model output reports a reworded
@@ -101,9 +135,14 @@ backend/data/
   prompts/<prompt-id>/
     prompt.json       name, tags, version index
     v1.txt, v2.txt    the exact text of each revision
+  inputs/<input-id>/
+    input.json        name, note, timestamps
+    input.txt         the material
   runs/<run-id>/
-    run.json          model, verdict, notes, timestamps
-    prompt.txt        the prompt exactly as sent
+    run.json          model, input, verdict, notes, timestamps
+    template.txt      the prompt version used
+    input.txt         the input used
+    prompt.txt        what those rendered into — exactly what was sent
     output.txt        the output exactly as returned
   index.jsonl         append-only event log
 ```
@@ -123,10 +162,14 @@ erase the fact that it happened.
 | `GET` | `/api/prompts/{id}` | prompt with version history |
 | `POST` | `/api/prompts/{id}/versions` | save a new version |
 | `POST` | `/api/uploads` | upload a `.txt` as a prompt or a new version |
+| `GET` | `/api/inputs` | list input sets |
+| `POST` | `/api/inputs` | create an input set |
+| `PATCH` | `/api/inputs/{id}` | edit an input set |
+| `GET` | `/api/prompts/{id}/preview` | the rendered prompt for a version and input |
 | `POST` | `/api/runs` | record an output |
 | `PATCH` | `/api/runs/{id}` | set your verdict and notes |
 | `POST` | `/api/generate` | call the configured model directly |
-| `GET` | `/api/prompts/{id}/matrix` | versions against models |
+| `GET` | `/api/prompts/{id}/matrix` | versions against models, optionally per input |
 | `GET` | `/api/compare?a=&b=` | word-level diff of two outputs |
 | `GET` | `/api/activity` | the append-only log |
 
@@ -153,10 +196,10 @@ cd backend && python -m unittest discover tests
 cd frontend && npm run build
 ```
 
-133 backend tests: the pipeline core (storage, immutable versioning, verdicts,
-diffing, the matrix), the HTTP surface, the model harness — exercised against a
-real local server, including that an API key never reaches an error message —
-and the scheduling example's own suite.
+168 backend tests: the pipeline core (storage, immutable versioning, input
+sets, prompt rendering, verdicts, diffing, the matrix), the HTTP surface, the
+model harness — exercised against a real local server, including that an API
+key never reaches an error message — and the scheduling example's own suite.
 
 ## Design notes
 

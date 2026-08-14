@@ -100,6 +100,12 @@ def build_matrix(runs: List[Run], versions: List[int],
     headline verdict. A cell with any inaccurate run reads as inaccurate even
     if a later attempt passed, because a model that got it wrong once is the
     thing worth noticing.
+
+    Callers filter `runs` to a single input before calling if they want a
+    like-for-like comparison; passing runs across several inputs aggregates
+    them, which is why each cell also reports how many distinct inputs it
+    covers. Comparing v1 on one passage against v2 on a different passage
+    tells you nothing, so the interface says which case it is showing.
     """
     model_list = models if models is not None else []
     if not model_list:
@@ -123,14 +129,23 @@ def build_matrix(runs: List[Run], versions: List[int],
                 "model": model,
                 "count": len(matching),
                 "verdict": headline_verdict(matching),
+                "inputs_covered": len({r.input_id for r in matching}),
                 "runs": [r.summary() for r in matching],
             }
+
+    missing = [
+        {"version": version, "model": model}
+        for version in versions for model in model_list
+        if cells[f"{version}|{model}"]["count"] == 0
+    ]
 
     return {
         "versions": versions,
         "models": model_list,
         "cells": cells,
         "totals": tally(runs),
+        "missing": missing,
+        "inputs_in_view": sorted({r.input_id for r in runs}),
     }
 
 

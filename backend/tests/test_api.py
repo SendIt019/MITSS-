@@ -280,6 +280,107 @@ class Api(unittest.TestCase):
         self.assertEqual(kinds[0], "prompt_created")
         self.assertIn("run_recorded", kinds)
 
+    # -- input sets -----------------------------------------------------
+
+    def _input(self, name="Passage A", text="Acme Corp opened in Lisbon."):
+        return self.client.post("/api/inputs",
+                                json={"name": name, "text": text}).json()
+
+    def test_create_and_list_inputs(self):
+        created = self._input()
+        self.assertEqual(created["id"], "passage-a")
+        listing = self.client.get("/api/inputs").json()["inputs"]
+        self.assertEqual(len(listing), 1)
+        self.assertEqual(listing[0]["name"], "Passage A")
+
+    def test_empty_input_rejected(self):
+        response = self.client.post("/api/inputs", json={"name": "x", "text": "  "})
+        self.assertEqual(response.status_code, 400)
+
+    def test_update_and_delete_input(self):
+        created = self._input()
+        updated = self.client.patch(f"/api/inputs/{created['id']}",
+                                    json={"text": "Globex opened in Berlin."}).json()
+        self.assertEqual(updated["text"], "Globex opened in Berlin.")
+        self.assertEqual(
+            self.client.delete(f"/api/inputs/{created['id']}").status_code, 200)
+        self.assertEqual(
+            self.client.get(f"/api/inputs/{created['id']}").status_code, 404)
+
+    def test_preview_renders_prompt_with_input(self):
+        prompt = self.client.post("/api/prompts", json={
+            "name": "Extract", "text": "List entities in {input}"}).json()
+        chosen = self._input()
+        body = self.client.get(
+            f"/api/prompts/{prompt['id']}/preview?input_id={chosen['id']}").json()
+        self.assertEqual(body["rendered"], "List entities in Acme Corp opened in Lisbon.")
+        self.assertTrue(body["has_placeholder"])
+        self.assertEqual(body["notes"], [])
+
+    def test_preview_warns_when_prompt_has_no_placeholder(self):
+        prompt = self._prompt()
+        chosen = self._input()
+        body = self.client.get(
+            f"/api/prompts/{prompt['id']}/preview?input_id={chosen['id']}").json()
+        self.assertIn("no_placeholder", [n["code"] for n in body["notes"]])
+        self.assertFalse(body["has_placeholder"])
+
+    def test_run_records_the_input_it_used(self):
+        prompt = self.client.post("/api/prompts", json={
+            "name": "Extract", "text": "List entities in {input}"}).json()
+        chosen = self._input()
+        run = self.client.post("/api/runs", json={
+            "prompt_id": prompt["id"], "model": "m", "output": "Acme Corp",
+            "input_id": chosen["id"]}).json()
+        self.assertEqual(run["input_id"], chosen["id"])
+        self.assertEqual(run["input_name"], "Passage A")
+        self.assertEqual(run["prompt_text"],
+                         "List entities in Acme Corp opened in Lisbon.")
+        self.assertEqual(run["template_text"], "List entities in {input}")
+
+    def test_matrix_can_be_filtered_to_one_input(self):
+        prompt = self.client.post("/api/prompts", json={
+            "name": "Extract", "text": "List entities in {input}"}).json()
+        a = self._input("Passage A", "Acme Corp")
+        b = self._input("Passage B", "Globex")
+
+        ra = self.client.post("/api/runs", json={
+            "prompt_id": prompt["id"], "model": "m", "output": "x",
+            "input_id": a["id"]}).json()
+        rb = self.client.post("/api/runs", json={
+            "prompt_id": prompt["id"], "model": "m", "output": "y",
+            "input_id": b["id"]}).json()
+        self.client.patch(f"/api/runs/{ra['id']}", json={"verdict": "accurate"})
+        self.client.patch(f"/api/runs/{rb['id']}", json={"verdict": "inaccurate"})
+
+        both = self.client.get(f"/api/prompts/{prompt['id']}/matrix").json()
+        self.assertEqual(both["cells"]["1|m"]["inputs_covered"], 2)
+        self.assertEqual(both["cells"]["1|m"]["verdict"], "inaccurate")
+        self.assertFalse(both["like_for_like"])
+
+        just_a = self.client.get(
+            f"/api/prompts/{prompt['id']}/matrix?input_id={a['id']}").json()
+        self.assertEqual(just_a["cells"]["1|m"]["verdict"], "accurate")
+        self.assertTrue(just_a["like_for_like"])
+
+    def test_runs_can_be_filtered_by_input(self):
+        prompt = self._prompt()
+        a = self._input("Passage A", "one")
+        self.client.post("/api/runs", json={
+            "prompt_id": prompt["id"], "model": "m", "output": "x", "input_id": a["id"]})
+        self.client.post("/api/runs", json={
+            "prompt_id": prompt["id"], "model": "m", "output": "y"})
+        filtered = self.client.get(f"/api/runs?input_id={a['id']}").json()["runs"]
+        self.assertEqual(len(filtered), 1)
+
+    def test_upload_an_input_file(self):
+        response = self.client.post(
+            "/api/inputs/upload",
+            files={"file": ("passage.txt", io.BytesIO(b"Some material."), "text/plain")},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["name"], "passage")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

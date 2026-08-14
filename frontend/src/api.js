@@ -60,10 +60,29 @@ export const api = {
   review: (id, verdict, notes) =>
     request(`/api/runs/${id}`, json('PATCH', { verdict, notes })),
   deleteRun: (id) => request(`/api/runs/${id}`, { method: 'DELETE' }),
-  generate: (promptId, version, model) =>
-    request('/api/generate', json('POST', { prompt_id: promptId, version, model })),
+  generate: (promptId, version, model, inputId = '') =>
+    request('/api/generate', json('POST',
+      { prompt_id: promptId, version, model, input_id: inputId })),
 
-  matrix: (promptId) => request(`/api/prompts/${promptId}/matrix`),
+  inputs: () => request('/api/inputs'),
+  input: (id) => request(`/api/inputs/${id}`),
+  createInput: (name, text, note) =>
+    request('/api/inputs', json('POST', { name, text, note })),
+  updateInput: (id, patch) => request(`/api/inputs/${id}`, json('PATCH', patch)),
+  deleteInput: (id) => request(`/api/inputs/${id}`, { method: 'DELETE' }),
+  uploadInput(file) {
+    const form = new FormData()
+    form.append('file', file)
+    return request('/api/inputs/upload', { method: 'POST', body: form })
+  },
+
+  preview: (promptId, version, inputId = '') =>
+    request(`/api/prompts/${promptId}/preview?${new URLSearchParams({
+      ...(version ? { version } : {}), ...(inputId ? { input_id: inputId } : {}),
+    })}`),
+
+  matrix: (promptId, inputId) =>
+    request(`/api/prompts/${promptId}/matrix${inputId ? `?input_id=${inputId}` : ''}`),
   compare: (a, b) => request(`/api/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`),
   compareVersions: (promptId, a, b) =>
     request(`/api/prompts/${promptId}/compare-versions?a=${a}&b=${b}`),

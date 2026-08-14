@@ -252,3 +252,43 @@ prompt library as a starting prompt.
 Rationale: it is a good illustration of a heavily specified prompt, and it
 still holds the provider harness that the pipeline imports. It is documented as
 an example so nobody mistakes it for the product again.
+
+## 2026-08-14 10:05 EDT — Input sets split from prompts
+
+Question from Jake while looking at the prompt screen: where do the inputs go?
+They had nowhere to go. The input data had to be pasted into the prompt box,
+which meant every new document became a new prompt version.
+
+That quietly broke what versions are for. v1 against v2 is only a fair test of
+wording if the material is held constant; "same wording, different passage"
+versions would have made the matrix meaningless.
+
+Inputs are now a separate, reusable library. A prompt carries an `{input}`
+placeholder, an input set carries the material, and the two render into the
+final prompt. Versions track wording; inputs track material.
+
+Consequences:
+- The copy button copies the *rendered* prompt, never the template. Copying one
+  thing and running another would be the worst possible bug in a tool whose
+  entire value is provenance.
+- A run freezes three texts, not one: the template, the input, and what they
+  rendered into. Editing or deleting an input afterwards cannot rewrite what a
+  past run was actually given — asserted by tests.
+- Inputs are editable, unlike prompt versions, precisely because of that
+  freezing.
+- Rendering stays deliberately dumb: one placeholder, straight substitution, no
+  expression language. A template engine would be a second thing to debug when
+  a prompt misbehaves.
+- An input supplied to a prompt with no `{input}` placeholder is appended at the
+  end with a warning rather than silently dropped.
+
+## 2026-08-14 10:08 EDT — The matrix says when it is not comparing like for like
+
+With inputs in play, a version-by-model grid aggregated across several inputs
+can mislead: v1 on an easy passage against v2 on a hard one says nothing about
+the wording.
+
+The matrix takes an optional input filter. Unfiltered it still renders — useful
+for coverage — but reports `like_for_like: false` and the interface shows a
+banner naming how many inputs are mixed in. Each cell also reports how many
+distinct inputs it covers, and the grid lists version/model pairings never run.
