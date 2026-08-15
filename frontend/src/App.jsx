@@ -40,6 +40,7 @@ export default function App() {
 
   const [outputText, setOutputText] = useState('')
   const [modelName, setModelName] = useState('')
+  const [runOnModel, setRunOnModel] = useState('')
   const [runNotes, setRunNotes] = useState('')
 
   const [compareA, setCompareA] = useState('')
@@ -82,7 +83,10 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    api.llm().then(setLlm).catch(() => setLlm(null))
+    api.llm().then((body) => {
+      setLlm(body)
+      if (body?.models?.length) setRunOnModel(body.models[0])
+    }).catch(() => setLlm(null))
     api.transcriptLocation().then((b) => setTranscriptPath(b.path)).catch(() => {})
     refreshPrompts()
     refreshInputs()
@@ -213,7 +217,8 @@ export default function App() {
 
   const onGenerate = () =>
     guard(async () => {
-      const run = await api.generate(prompt.id, viewVersion, modelName, inputId)
+      const chosen = runOnModel || modelName
+      const run = await api.generate(prompt.id, viewVersion, chosen, inputId)
       await refreshCurrent()
       setOpenRun(run)
       setTab('runs')
@@ -444,9 +449,29 @@ export default function App() {
                         />
                       </Field>
                       {llm?.available && (
-                        <button onClick={onGenerate} disabled={busy}>
-                          Fetch from {llm.provider}
-                        </button>
+                        llm.models?.length ? (
+                          <div className="run-on">
+                            <label className="field">Run on</label>
+                            <div className="row" style={{ gap: 6 }}>
+                              <select
+                                value={runOnModel}
+                                onChange={(event) => setRunOnModel(event.target.value)}
+                              >
+                                {llm.models.map((name) => (
+                                  <option key={name} value={name}>{name}</option>
+                                ))}
+                              </select>
+                              <button className="primary" onClick={onGenerate}
+                                      disabled={busy || dirty}>
+                                Run
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <button onClick={onGenerate} disabled={busy || dirty}>
+                            Fetch from {llm.provider}
+                          </button>
+                        )
                       )}
                     </div>
 

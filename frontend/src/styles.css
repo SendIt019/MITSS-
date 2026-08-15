@@ -379,3 +379,7 @@ code {
 /* Transcript links in the masthead */
 .chip.link { text-decoration: none; cursor: pointer; }
 .chip.link:hover { border-color: var(--baseline); color: var(--text-primary); }
+
+/* Run-on model picker, shown when a provider reports available models */
+.run-on { display: flex; flex-direction: column; }
+.run-on select { min-width: 150px; }

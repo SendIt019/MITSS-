@@ -244,14 +244,17 @@ def generate_run(prompt_id: str, version: Optional[int] = None, model: str = "",
     provider = get_provider()
     started = time.monotonic()
     try:
-        output = provider.complete(rendered)
+        # Pass the chosen model through, so the endpoint is actually asked for
+        # it rather than the run merely being labelled with it.
+        output = provider.complete(rendered, model or None)
     except ProviderUnavailable as exc:
         raise ServiceError(str(exc), 409) from None
     except LLMError as exc:
         raise ServiceError(str(exc), 502) from None
     elapsed = int((time.monotonic() - started) * 1000)
 
-    label = model or provider.describe().get("model") or provider.name
+    described = provider.describe()
+    label = model or described.get("model") or provider.name
     run = shelf.create_run(prompt_id, target, label, output, source="provider",
                            duration_ms=elapsed, input_id=input_id)
     return run.to_dict()

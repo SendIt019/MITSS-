@@ -76,7 +76,7 @@ class Manual(unittest.TestCase):
 class Http(unittest.TestCase):
     def setUp(self):
         for key in ("MITSS_LLM_URL", "MITSS_LLM_API_KEY", "MITSS_LLM_FORMAT",
-                    "MITSS_LLM_MODEL"):
+                    "MITSS_LLM_MODEL", "MITSS_LLM_MODELS"):
             os.environ.pop(key, None)
         RECEIVED.clear()
 
@@ -150,6 +150,36 @@ class Http(unittest.TestCase):
         finally:
             os.environ.pop("MITSS_LLM_API_KEY", None)
 
+    def test_model_argument_reaches_the_request_body(self):
+        # Regression: the chosen model used to label the run without ever
+        # being sent, so the endpoint answered as a different model.
+        REPLY["status"] = 200
+        REPLY["body"] = json.dumps({"completion": "ok"})
+        with StubServer() as url:
+            HttpProvider(url=url, fmt="raw", model="default-model").complete(
+                "x", model="team-70b")
+        self.assertEqual(RECEIVED["body"]["model"], "team-70b")
+
+    def test_model_argument_falls_back_to_the_configured_default(self):
+        REPLY["status"] = 200
+        REPLY["body"] = json.dumps({"completion": "ok"})
+        with StubServer() as url:
+            HttpProvider(url=url, fmt="raw", model="default-model").complete("x")
+        self.assertEqual(RECEIVED["body"]["model"], "default-model")
+
+    def test_models_list_is_parsed_in_order_without_duplicates(self):
+        os.environ["MITSS_LLM_MODELS"] = " team-7b , team-70b ,team-7b, "
+        provider = HttpProvider(url="http://x")
+        self.assertEqual(provider.models, ["team-7b", "team-70b"])
+        self.assertEqual(provider.describe()["models"], ["team-7b", "team-70b"])
+
+    def test_models_falls_back_to_the_single_model(self):
+        provider = HttpProvider(url="http://x", model="only-one")
+        self.assertEqual(provider.models, ["only-one"])
+
+    def test_manual_provider_offers_no_models(self):
+        self.assertEqual(ManualProvider().describe()["models"], [])
+
     def test_unreachable_endpoint_is_a_clean_error(self):
         provider = HttpProvider(url="http://127.0.0.1:9/never", timeout=2)
         with self.assertRaises(LLMError):
@@ -167,7 +197,7 @@ class Registry(unittest.TestCase):
             def available(self):
                 return True
 
-            def complete(self, prompt):
+            def complete(self, prompt, model=None):
                 return f"echo: {prompt}"
 
         register_provider("echo", EchoProvider)

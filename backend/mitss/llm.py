@@ -18,7 +18,8 @@ Environment variables:
     MITSS_LLM_PROVIDER   manual (default) | http
     MITSS_LLM_URL        endpoint for the http provider
     MITSS_LLM_FORMAT     openai (default) | raw
-    MITSS_LLM_MODEL      model name sent in the request body
+    MITSS_LLM_MODEL      default model name sent in the request body
+    MITSS_LLM_MODELS     comma-separated list offered in the interface
     MITSS_LLM_API_KEY    optional; sent as "Authorization: Bearer <key>"
     MITSS_LLM_TIMEOUT    seconds, default 120
 """
@@ -30,7 +31,7 @@ import os
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 class LLMError(RuntimeError):
@@ -57,12 +58,22 @@ class LLMProvider(ABC):
         """True if complete() can be called right now."""
 
     @abstractmethod
-    def complete(self, prompt: str) -> str:
-        """Send the prompt, return the raw reply text."""
+    def complete(self, prompt: str, model: Optional[str] = None) -> str:
+        """Send the prompt, return the raw reply text.
+
+        `model` overrides the configured default for this one call, so an
+        interface can offer a choice without reconfiguring the provider.
+        """
+
+    @property
+    def models(self) -> List[str]:
+        """Model names this provider can be asked for. Empty means unknown."""
+        return []
 
     def describe(self) -> Dict[str, Any]:
         """Non-secret description for the API and the interface."""
-        return {"provider": self.name, "available": self.available}
+        return {"provider": self.name, "available": self.available,
+                "models": self.models}
 
 
 class ManualProvider(LLMProvider):
@@ -74,7 +85,7 @@ class ManualProvider(LLMProvider):
     def available(self) -> bool:
         return False
 
-    def complete(self, prompt: str) -> str:
+    def complete(self, prompt: str, model: Optional[str] = None) -> str:
         raise ProviderUnavailable(
             "the manual provider does not call a model - copy the packet, run it "
             "through your model, and paste the reply back"
@@ -84,6 +95,7 @@ class ManualProvider(LLMProvider):
         return {
             "provider": self.name,
             "available": False,
+            "models": [],
             "mode": "paste",
             "note": "set MITSS_LLM_PROVIDER=http and MITSS_LLM_URL to call a model directly",
         }
@@ -113,6 +125,24 @@ class HttpProvider(LLMProvider):
     def available(self) -> bool:
         return bool(self.url)
 
+    @property
+    def models(self) -> List[str]:
+        """Names offered in the interface.
+
+        MITSS_LLM_MODELS is a comma-separated list; if it is unset the single
+        MITSS_LLM_MODEL is the only choice. Order is preserved and duplicates
+        are dropped, so the list reads the way it was written.
+        """
+        raw = os.environ.get("MITSS_LLM_MODELS", "")
+        names: List[str] = []
+        for candidate in raw.split(","):
+            cleaned = candidate.strip()
+            if cleaned and cleaned not in names:
+                names.append(cleaned)
+        if names:
+            return names
+        return [self.model] if self.model else []
+
     def describe(self) -> Dict[str, Any]:
         return {
             "provider": self.name,
@@ -120,24 +150,30 @@ class HttpProvider(LLMProvider):
             "url": self.url or None,
             "format": self.format,
             "model": self.model,
+            "models": self.models,
             # Presence only. The value is never exposed.
             "api_key_set": bool(os.environ.get("MITSS_LLM_API_KEY")),
         }
 
-    def complete(self, prompt: str) -> str:
+    def complete(self, prompt: str, model: Optional[str] = None) -> str:
         if not self.url:
             raise ProviderUnavailable(
                 "MITSS_LLM_URL is not set; cannot call a model automatically"
             )
 
+        # The chosen model must reach the request body, not just the run's
+        # label. Labelling a run with a model the endpoint never saw would
+        # make every later comparison a lie.
+        chosen = model or self.model
+
         if self.format == "openai":
             body = {
-                "model": self.model,
+                "model": chosen,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0,
             }
         else:
-            body = {"model": self.model, "prompt": prompt}
+            body = {"model": chosen, "prompt": prompt}
 
         request = urllib.request.Request(
             self.url,

@@ -316,3 +316,31 @@ its own folder by that point.
 
 Deleting a run removes its folder but leaves its transcript entry, matching how
 the event index already behaves.
+
+## 2026-08-15 17:20 EDT — SANDBOX.md described a feature that did not exist
+
+Jake's own commit (cfc766d, written with Claude Code) added SANDBOX.md
+documenting `MITSS_LLM_MODELS`, a **Run on ▾** model dropdown, and a `models`
+list on `GET /api/llm`. None of the three existed in the code. Configuring
+`.env` per those instructions would have produced no dropdown and silently sent
+every request as the default model.
+
+The verification block in that file exposed it: the stand-in endpoint echoed
+`local-model` rather than the `team-70b` that was asked for.
+
+Built the feature rather than deleting the documentation, since a model picker
+is genuinely useful and the docs were a reasonable specification.
+
+- `MITSS_LLM_MODELS` is a comma-separated list, order preserved, duplicates
+  dropped, falling back to the single `MITSS_LLM_MODEL`.
+- `LLMProvider.complete` takes an optional `model` override. The chosen model
+  now reaches the request body, not just the run's label — labelling a run with
+  a model the endpoint never saw would make every later comparison a lie. That
+  is the regression test.
+- `describe()` reports `models`, so the interface can offer the choice.
+- The Prompt tab shows a **Run on** picker and a **Run** button when the
+  provider reports models, and the old single-button fetch otherwise.
+
+Note for anyone who wrote a custom provider before this: `complete` gained a
+second parameter with a default, so existing subclasses keep working, but new
+ones should accept and honour it.
