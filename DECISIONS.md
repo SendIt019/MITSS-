@@ -364,3 +364,27 @@ were still holding :8000 and :5173, so a new `./dev.sh` failed to bind — uvico
 logged "Address already in use" and Vite silently moved to :5174, where the
 proxy still worked but nothing advertised the port. If the app misbehaves
 strangely, check `lsof -nP -iTCP:5173 -iTCP:8000 -sTCP:LISTEN` first.
+
+## 2026-08-15 17:28 EDT — Restored the M-SALUTE feature clobbered by delivered files
+
+Commit 1537b75 (M-SALUTE structured inputs, mission-file default prompt, title
+rename fixes) is an ancestor of main, but the three commits delivered from
+another session (cfc766d, 3d2f0e2, 73023a1) were built from files that predated
+it, so committing them regressed `App.jsx`, `Inputs.jsx`, and `styles.css` to
+pre-M-SALUTE content. `salute.js` survived, orphaned — nothing imported it.
+
+Merged forward rather than reverting: `Inputs.jsx` restored verbatim from
+1537b75 (HEAD's copy was byte-identical to the pre-M-SALUTE version, so nothing
+newer was lost), and the M-SALUTE sample template, title focus/rename fixes,
+and salute CSS grafted into `App.jsx`/`styles.css` alongside the transcript
+links and model picker those commits added.
+
+Also reconciled 8cbfdd9 (Jake's model dropdown, likewise clobbered then rebuilt
+by 73023a1): the rebuild covered everything except the success toast naming
+the model that ran; that line is now restored. The rebuild's extras — fallback
+fetch button when no models are configured, run disabled while the prompt has
+unsaved edits — are kept.
+
+Verified in a real browser (headless Chrome via Playwright): all seven fields
+render in order, an input created through the form appears in the library, and
+reopening it parses the stored block back into the fields. No console errors.
