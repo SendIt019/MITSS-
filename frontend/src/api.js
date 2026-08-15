@@ -81,6 +81,12 @@ export const api = {
       ...(version ? { version } : {}), ...(inputId ? { input_id: inputId } : {}),
     })}`),
 
+  transcriptUrl: (download = true) =>
+    `${BASE}/api/transcript${download ? '?download=true' : ''}`,
+  transcript: (limit) =>
+    request(`/api/transcript${limit ? `?limit=${limit}` : ''}`),
+  transcriptLocation: () => request('/api/transcript/location'),
+
   matrix: (promptId, inputId) =>
     request(`/api/prompts/${promptId}/matrix${inputId ? `?input_id=${inputId}` : ''}`),
   compare: (a, b) => request(`/api/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`),

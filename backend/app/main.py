@@ -132,6 +132,22 @@ def activity(limit: int = Query(50, ge=1, le=500)):
     return {"events": service.activity(limit)}
 
 
+@app.get("/api/transcript", response_class=PlainTextResponse)
+def transcript(limit: Optional[int] = Query(None, ge=1),
+               download: bool = Query(False)):
+    """The rolling plain-text transcript of every recorded run."""
+    text = service.transcript(limit)
+    headers = ({"Content-Disposition": 'attachment; filename="mitss-transcript.txt"'}
+               if download else {})
+    return PlainTextResponse(text, media_type="text/plain", headers=headers)
+
+
+@app.get("/api/transcript/location")
+def transcript_location():
+    """Where the transcript lives on disk, for opening it outside the app."""
+    return {"path": service.transcript_location()}
+
+
 # --------------------------------------------------------------------------
 # prompts
 # --------------------------------------------------------------------------

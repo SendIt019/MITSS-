@@ -28,6 +28,7 @@ from .models import (
     slugify,
 )
 from .render import PLACEHOLDER, has_placeholder, preview, render_prompt
+from .transcript import read as read_transcript, transcript_path
 from .store import NotFound, Store
 
 __all__ = [
@@ -50,6 +51,8 @@ __all__ = [
     "has_placeholder",
     "is_verdict",
     "preview",
+    "read_transcript",
     "render_prompt",
+    "transcript_path",
     "slugify",
 ]

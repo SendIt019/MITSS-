@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional
 
 from .models import InputSet, Prompt, PromptVersion, Run, UNRATED, slugify
 from .render import render_prompt
+from . import transcript
 
 INDEX_NAME = "index.jsonl"
 
@@ -352,6 +353,12 @@ class Store:
             duration_ms=duration_ms,
         )
         self._persist_run(run)
+        # The rolling human-readable transcript is best-effort: a failure to
+        # write it must never lose the run itself, which is already on disk.
+        try:
+            transcript.append_run(self.data_dir, run)
+        except OSError:
+            pass
         self.append_event({
             "event": "run_recorded", "run_id": run_id, "prompt_id": prompt_id,
             "version": version, "model": model, "verdict": verdict,
@@ -415,6 +422,10 @@ class Store:
             run.notes = notes
         run.reviewed_at = now()
         self._persist_run(run)
+        try:
+            transcript.append_verdict(self.data_dir, run)
+        except OSError:
+            pass
         self.append_event({"event": "run_reviewed", "run_id": run_id,
                            "verdict": run.verdict})
         return run

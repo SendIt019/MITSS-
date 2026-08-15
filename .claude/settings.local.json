@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://127.0.0.1:8000/docs)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://127.0.0.1:5173/)",
+      "Bash(curl *)",
+      "Bash(python3 -c \"import json,sys; [print\\(p['id'],'|',p['name']\\) for p in json.load\\(sys.stdin\\)['prompts']]\")",
+      "Bash(python3 -m json.tool)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
+    ]
+  }
+}

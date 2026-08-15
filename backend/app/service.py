@@ -14,6 +14,7 @@ from mitss.llm import LLMError, ProviderUnavailable, get_provider
 from pipeline import NotFound, Store, build_matrix, compare_runs, diff_text
 from pipeline.models import UNRATED, VERDICT_LABELS, VERDICTS, is_verdict
 from pipeline.render import preview as render_preview, render_prompt
+from pipeline.transcript import read as read_transcript, transcript_path
 
 BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -243,7 +244,7 @@ def generate_run(prompt_id: str, version: Optional[int] = None, model: str = "",
     provider = get_provider()
     started = time.monotonic()
     try:
-        output = provider.complete(rendered, model or None)
+        output = provider.complete(rendered)
     except ProviderUnavailable as exc:
         raise ServiceError(str(exc), 409) from None
     except LLMError as exc:
@@ -321,3 +322,14 @@ def verdict_options() -> List[Dict[str, str]]:
 
 def activity(limit: int = 50, root: Optional[str] = None) -> List[Dict[str, Any]]:
     return store(root).read_events(limit=limit)
+
+
+def transcript(limit: Optional[int] = None, root: Optional[str] = None) -> str:
+    """The rolling plain-text transcript of every run."""
+    shelf = store(root)
+    text = read_transcript(shelf.data_dir, limit)
+    return text or "No runs recorded yet.\n"
+
+
+def transcript_location(root: Optional[str] = None) -> str:
+    return transcript_path(store(root).data_dir)

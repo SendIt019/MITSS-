@@ -292,3 +292,27 @@ The matrix takes an optional input filter. Unfiltered it still renders — usefu
 for coverage — but reports `like_for_like: false` and the interface shows a
 banner naming how many inputs are mixed in. Each cell also reports how many
 distinct inputs it covers, and the grid lists version/model pairings never run.
+
+## 2026-08-15 17:05 EDT — Rolling plain-text transcript
+
+Jake asked whether an auto-fetched output could land in a single overarching
+.txt file as well as the interface. It could not: the only whole-history file
+was `index.jsonl`, which is machine-readable and not something anyone would sit
+and read.
+
+`data/transcript.txt` now accumulates a full block per run — timestamp, prompt
+id and version, model, input name, source, duration, the complete rendered
+prompt, the complete output, and the verdict. One file you can open, scroll,
+grep, print, or hand to someone without the tool installed.
+
+Append-only, like the index. A verdict set after the fact is appended as its
+own line rather than edited into the block above, so the file stays a true
+history. The consequence to know when reading it: a block can say "not reviewed
+yet" while a later line records the verdict. It is a log, not a table.
+
+Writing the transcript is best-effort and wrapped in a try. A failure to write
+a convenience file must never lose the run itself, which is already on disk in
+its own folder by that point.
+
+Deleting a run removes its folder but leaves its transcript entry, matching how
+the event index already behaves.

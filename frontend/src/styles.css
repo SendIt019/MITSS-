@@ -169,18 +169,6 @@ select { width: auto; min-width: 120px; }
 textarea { font-family: var(--mono); font-size: 12.5px; resize: vertical; }
 .prompt-editor { min-height: 260px; }
 .output-input { min-height: 170px; }
-.salute-input { min-height: 0; }
-
-/* M-SALUTE input form */
-.salute-form { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
-.salute-field { display: flex; gap: 10px; align-items: flex-start; }
-.salute-letter {
-  flex: 0 0 auto; width: 26px; height: 26px; margin-top: 22px;
-  display: grid; place-items: center; border-radius: var(--radius-sm);
-  background: var(--page); border: 1px solid var(--border);
-  font-family: var(--mono); font-weight: 600; font-size: 13px; color: var(--series-1);
-}
-.salute-body { flex: 1 1 auto; min-width: 0; }
 
 label.field { display: block; font-size: 12.5px; color: var(--text-secondary); margin-bottom: 4px; }
 
@@ -387,3 +375,7 @@ code {
   border-radius: 3px;
   padding: 0 4px;
 }
+
+/* Transcript links in the masthead */
+.chip.link { text-decoration: none; cursor: pointer; }
+.chip.link:hover { border-color: var(--baseline); color: var(--text-primary); }

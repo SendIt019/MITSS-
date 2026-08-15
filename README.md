@@ -144,8 +144,17 @@ backend/data/
     input.txt         the input used
     prompt.txt        what those rendered into — exactly what was sent
     output.txt        the output exactly as returned
+  transcript.txt      rolling plain-text log of every run, readable
   index.jsonl         append-only event log
 ```
+
+`transcript.txt` is the file to open when you want to read the history rather
+than click through it. Each run appends a block with the model, the version,
+the input, the full rendered prompt, the full output and the verdict. It is
+append-only: a verdict set after the fact appears as its own line further down
+rather than being edited into the block above, so it reads as a log, not a
+table. The interface links to it in the top right, and `GET /api/transcript`
+serves it.
 
 `index.jsonl` records every prompt created, version added, output recorded,
 verdict set and run deleted. It is never rewritten, so deleting a run does not
@@ -171,7 +180,8 @@ erase the fact that it happened.
 | `POST` | `/api/generate` | call the configured model directly |
 | `GET` | `/api/prompts/{id}/matrix` | versions against models, optionally per input |
 | `GET` | `/api/compare?a=&b=` | word-level diff of two outputs |
-| `GET` | `/api/activity` | the append-only log |
+| `GET` | `/api/activity` | the append-only event log |
+| `GET` | `/api/transcript` | the rolling plain-text transcript (`?download=true`) |
 
 Interactive documentation at `http://127.0.0.1:8000/docs`.
 
@@ -196,8 +206,8 @@ cd backend && python -m unittest discover tests
 cd frontend && npm run build
 ```
 
-168 backend tests: the pipeline core (storage, immutable versioning, input
-sets, prompt rendering, verdicts, diffing, the matrix), the HTTP surface, the
+179 backend tests: the pipeline core (storage, immutable versioning, input
+sets, prompt rendering, verdicts, diffing, the matrix, the transcript), the HTTP surface, the
 model harness — exercised against a real local server, including that an API
 key never reaches an error message — and the scheduling example's own suite.
 

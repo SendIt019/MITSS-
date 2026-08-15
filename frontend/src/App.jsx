@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from './api'
 import DiffText, { DiffLegend } from './components/DiffText'
 import Inputs from './components/Inputs'
@@ -8,41 +8,23 @@ import {
   timeAgo,
 } from './components/Panels'
 
-const SAMPLE = `You produce an M-SALUTE mission file from the reporting below.
+const SAMPLE = `You are extracting structured facts from an incident report.
 
-Read the input and fill in each field. Anchor everything to the mission
-objective: state the GFC (Ground Force Commander) intent first, then report
-the observed facts that bear on it.
+Read the report below and return, for each distinct event:
+  - what happened, in one sentence
+  - when it happened
+  - which system was affected
+  - whether it was resolved
 
-Return exactly these seven fields, in this order, each on its own line:
+Return the events in the order they occurred. If a detail is not stated
+in the report, write "not stated" rather than inferring it.
 
-[MISSION OBJECTIVE (GFC INTENT)]
-<what the mission must achieve, in the commander's intent>
-[SIZE]
-<number and type of personnel or elements>
-[ACTIVITY]
-<what they are doing>
-[LOCATION]
-<grid or place>
-[UNIT]
-<identifying unit or affiliation>
-[TIME]
-<when observed, DTG if given>
-[EQUIPMENT]
-<weapons, vehicles, notable kit>
-
-If a detail is not stated in the input, write "not reported" rather than
-inferring it. Do not add fields or commentary outside the seven above.
-
-INPUT:
+REPORT:
 {input}`
 
 export default function App() {
   const [prompts, setPrompts] = useState([])
   const [prompt, setPrompt] = useState(null)
-  const [titleDraft, setTitleDraft] = useState('')
-  const titleRef = useRef(null)
-  const wantTitleFocus = useRef(false)
   const [draft, setDraft] = useState('')
   const [versionNote, setVersionNote] = useState('')
   const [viewVersion, setViewVersion] = useState(null)
@@ -58,13 +40,13 @@ export default function App() {
 
   const [outputText, setOutputText] = useState('')
   const [modelName, setModelName] = useState('')
-  const [runModel, setRunModel] = useState('')
   const [runNotes, setRunNotes] = useState('')
 
   const [compareA, setCompareA] = useState('')
   const [compareB, setCompareB] = useState('')
   const [comparison, setComparison] = useState(null)
 
+  const [transcriptPath, setTranscriptPath] = useState('')
   const [tab, setTab] = useState('prompt')
   const [llm, setLlm] = useState(null)
   const [busy, setBusy] = useState(false)
@@ -100,13 +82,8 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    api.llm()
-      .then((status) => {
-        setLlm(status)
-        // Pre-select the first configured model so Run is usable immediately.
-        if (status?.models?.length) setRunModel((prev) => prev || status.models[0])
-      })
-      .catch(() => setLlm(null))
+    api.llm().then(setLlm).catch(() => setLlm(null))
+    api.transcriptLocation().then((b) => setTranscriptPath(b.path)).catch(() => {})
     refreshPrompts()
     refreshInputs()
   }, [refreshPrompts, refreshInputs])
@@ -114,7 +91,6 @@ export default function App() {
   const loadPrompt = useCallback(async (id, version) => {
     const detail = await api.prompt(id, version)
     setPrompt(detail)
-    setTitleDraft(detail.name)
     setDraft(detail.selected_version?.text || '')
     setViewVersion(detail.selected_version?.version ?? null)
     setVersionNote('')
@@ -137,16 +113,6 @@ export default function App() {
     if (prompt) await loadPrompt(prompt.id, viewVersion || undefined)
   }, [prompt, viewVersion, loadPrompt])
 
-  // After creating a prompt, drop the cursor straight into the title and select
-  // "Untitled prompt" so it can be renamed by just typing.
-  useEffect(() => {
-    if (wantTitleFocus.current && prompt && titleRef.current) {
-      titleRef.current.focus()
-      titleRef.current.select()
-      wantTitleFocus.current = false
-    }
-  }, [prompt])
-
   // The rendered prompt is what actually gets sent, so it is recomputed
   // whenever the version or the chosen input changes — and it is what the
   // copy button copies. Copying the template while running the rendered text
@@ -166,10 +132,9 @@ export default function App() {
     guard(async () => {
       const created = await api.createPrompt('Untitled prompt', SAMPLE, 'starting point')
       await refreshPrompts()
-      wantTitleFocus.current = true
       await loadPrompt(created.id)
       setTab('prompt')
-      say('New prompt created — name it')
+      say('New prompt created')
     })
 
   const onUpload = (file) =>
@@ -246,13 +211,13 @@ export default function App() {
   const onCompare = () =>
     guard(async () => setComparison(await api.compare(compareA, compareB)))
 
-  const onGenerate = (model) =>
+  const onGenerate = () =>
     guard(async () => {
-      const run = await api.generate(prompt.id, viewVersion, model, inputId)
+      const run = await api.generate(prompt.id, viewVersion, modelName, inputId)
       await refreshCurrent()
       setOpenRun(run)
       setTab('runs')
-      say(`Output fetched from ${model || 'your model'}`)
+      say('Output fetched from your model')
     })
 
   const onMatrixInput = (value) =>
@@ -283,6 +248,13 @@ export default function App() {
           <p>Write a prompt, run it through your model, record what came back.</p>
         </div>
         <div className="row">
+          <a href={api.transcriptUrl(false)} target="_blank" rel="noreferrer"
+             className="chip link" title={transcriptPath}>
+            transcript
+          </a>
+          <a href={api.transcriptUrl(true)} download className="chip link">
+            download .txt
+          </a>
           {llm && (
             <span className={`chip ${llm.available ? 'ok' : 'wait'}`}>
               <span className="dot" />
@@ -337,20 +309,14 @@ export default function App() {
             <>
               <div className="prompt-head">
                 <input
-                  ref={titleRef}
                   className="title-input"
-                  value={titleDraft}
-                  aria-label="Prompt title"
-                  onChange={(event) => setTitleDraft(event.target.value)}
-                  onBlur={() => {
-                    const next = titleDraft.trim()
-                    if (!next) { setTitleDraft(prompt.name); return }
-                    if (next !== prompt.name) onRename(next)
+                  value={prompt.name}
+                  onChange={(event) => setPrompt({ ...prompt, name: event.target.value })}
+                  onBlur={(event) => {
+                    if (event.target.value.trim() && event.target.value !== prompt.name) return
+                    onRename(event.target.value)
                   }}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter') event.target.blur()
-                    if (event.key === 'Escape') { setTitleDraft(prompt.name); event.target.blur() }
-                  }}
+                  onKeyDown={(event) => event.key === 'Enter' && event.target.blur()}
                 />
                 <div className="row">
                   {tally && (
@@ -477,26 +443,10 @@ export default function App() {
                           placeholder="temperature 0, second attempt…"
                         />
                       </Field>
-                      {llm?.available && llm.models?.length > 0 && (
-                        <>
-                          <Field label={`Run on ${llm.provider}`}>
-                            <select
-                              value={runModel}
-                              onChange={(event) => setRunModel(event.target.value)}
-                            >
-                              {llm.models.map((name) => (
-                                <option key={name} value={name}>{name}</option>
-                              ))}
-                            </select>
-                          </Field>
-                          <button
-                            className="primary"
-                            onClick={() => onGenerate(runModel)}
-                            disabled={busy || !runModel}
-                          >
-                            Run
-                          </button>
-                        </>
+                      {llm?.available && (
+                        <button onClick={onGenerate} disabled={busy}>
+                          Fetch from {llm.provider}
+                        </button>
                       )}
                     </div>
 
