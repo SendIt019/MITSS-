@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
 import DiffText, { DiffLegend } from './components/DiffText'
 import Inputs from './components/Inputs'
@@ -8,23 +8,41 @@ import {
   timeAgo,
 } from './components/Panels'
 
-const SAMPLE = `You are extracting structured facts from an incident report.
+const SAMPLE = `You produce an M-SALUTE mission file from the reporting below.
 
-Read the report below and return, for each distinct event:
-  - what happened, in one sentence
-  - when it happened
-  - which system was affected
-  - whether it was resolved
+Read the input and fill in each field. Anchor everything to the mission
+objective: state the GFC (Ground Force Commander) intent first, then report
+the observed facts that bear on it.
 
-Return the events in the order they occurred. If a detail is not stated
-in the report, write "not stated" rather than inferring it.
+Return exactly these seven fields, in this order, each on its own line:
 
-REPORT:
+[MISSION OBJECTIVE (GFC INTENT)]
+<what the mission must achieve, in the commander's intent>
+[SIZE]
+<number and type of personnel or elements>
+[ACTIVITY]
+<what they are doing>
+[LOCATION]
+<grid or place>
+[UNIT]
+<identifying unit or affiliation>
+[TIME]
+<when observed, DTG if given>
+[EQUIPMENT]
+<weapons, vehicles, notable kit>
+
+If a detail is not stated in the input, write "not reported" rather than
+inferring it. Do not add fields or commentary outside the seven above.
+
+INPUT:
 {input}`
 
 export default function App() {
   const [prompts, setPrompts] = useState([])
   const [prompt, setPrompt] = useState(null)
+  const [titleDraft, setTitleDraft] = useState('')
+  const titleRef = useRef(null)
+  const wantTitleFocus = useRef(false)
   const [draft, setDraft] = useState('')
   const [versionNote, setVersionNote] = useState('')
   const [viewVersion, setViewVersion] = useState(null)
@@ -89,6 +107,7 @@ export default function App() {
   const loadPrompt = useCallback(async (id, version) => {
     const detail = await api.prompt(id, version)
     setPrompt(detail)
+    setTitleDraft(detail.name)
     setDraft(detail.selected_version?.text || '')
     setViewVersion(detail.selected_version?.version ?? null)
     setVersionNote('')
@@ -111,6 +130,16 @@ export default function App() {
     if (prompt) await loadPrompt(prompt.id, viewVersion || undefined)
   }, [prompt, viewVersion, loadPrompt])
 
+  // After creating a prompt, drop the cursor straight into the title and select
+  // "Untitled prompt" so it can be renamed by just typing.
+  useEffect(() => {
+    if (wantTitleFocus.current && prompt && titleRef.current) {
+      titleRef.current.focus()
+      titleRef.current.select()
+      wantTitleFocus.current = false
+    }
+  }, [prompt])
+
   // The rendered prompt is what actually gets sent, so it is recomputed
   // whenever the version or the chosen input changes — and it is what the
   // copy button copies. Copying the template while running the rendered text
@@ -130,9 +159,10 @@ export default function App() {
     guard(async () => {
       const created = await api.createPrompt('Untitled prompt', SAMPLE, 'starting point')
       await refreshPrompts()
+      wantTitleFocus.current = true
       await loadPrompt(created.id)
       setTab('prompt')
-      say('New prompt created')
+      say('New prompt created — name it')
     })
 
   const onUpload = (file) =>
@@ -300,14 +330,20 @@ export default function App() {
             <>
               <div className="prompt-head">
                 <input
+                  ref={titleRef}
                   className="title-input"
-                  value={prompt.name}
-                  onChange={(event) => setPrompt({ ...prompt, name: event.target.value })}
-                  onBlur={(event) => {
-                    if (event.target.value.trim() && event.target.value !== prompt.name) return
-                    onRename(event.target.value)
+                  value={titleDraft}
+                  aria-label="Prompt title"
+                  onChange={(event) => setTitleDraft(event.target.value)}
+                  onBlur={() => {
+                    const next = titleDraft.trim()
+                    if (!next) { setTitleDraft(prompt.name); return }
+                    if (next !== prompt.name) onRename(next)
                   }}
-                  onKeyDown={(event) => event.key === 'Enter' && event.target.blur()}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') event.target.blur()
+                    if (event.key === 'Escape') { setTitleDraft(prompt.name); event.target.blur() }
+                  }}
                 />
                 <div className="row">
                   {tally && (
