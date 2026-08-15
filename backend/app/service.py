@@ -243,7 +243,7 @@ def generate_run(prompt_id: str, version: Optional[int] = None, model: str = "",
     provider = get_provider()
     started = time.monotonic()
     try:
-        output = provider.complete(rendered)
+        output = provider.complete(rendered, model or None)
     except ProviderUnavailable as exc:
         raise ServiceError(str(exc), 409) from None
     except LLMError as exc:

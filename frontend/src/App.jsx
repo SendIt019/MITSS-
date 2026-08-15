@@ -58,6 +58,7 @@ export default function App() {
 
   const [outputText, setOutputText] = useState('')
   const [modelName, setModelName] = useState('')
+  const [runModel, setRunModel] = useState('')
   const [runNotes, setRunNotes] = useState('')
 
   const [compareA, setCompareA] = useState('')
@@ -99,7 +100,13 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    api.llm().then(setLlm).catch(() => setLlm(null))
+    api.llm()
+      .then((status) => {
+        setLlm(status)
+        // Pre-select the first configured model so Run is usable immediately.
+        if (status?.models?.length) setRunModel((prev) => prev || status.models[0])
+      })
+      .catch(() => setLlm(null))
     refreshPrompts()
     refreshInputs()
   }, [refreshPrompts, refreshInputs])
@@ -239,13 +246,13 @@ export default function App() {
   const onCompare = () =>
     guard(async () => setComparison(await api.compare(compareA, compareB)))
 
-  const onGenerate = () =>
+  const onGenerate = (model) =>
     guard(async () => {
-      const run = await api.generate(prompt.id, viewVersion, modelName, inputId)
+      const run = await api.generate(prompt.id, viewVersion, model, inputId)
       await refreshCurrent()
       setOpenRun(run)
       setTab('runs')
-      say('Output fetched from your model')
+      say(`Output fetched from ${model || 'your model'}`)
     })
 
   const onMatrixInput = (value) =>
@@ -470,10 +477,26 @@ export default function App() {
                           placeholder="temperature 0, second attempt…"
                         />
                       </Field>
-                      {llm?.available && (
-                        <button onClick={onGenerate} disabled={busy}>
-                          Fetch from {llm.provider}
-                        </button>
+                      {llm?.available && llm.models?.length > 0 && (
+                        <>
+                          <Field label={`Run on ${llm.provider}`}>
+                            <select
+                              value={runModel}
+                              onChange={(event) => setRunModel(event.target.value)}
+                            >
+                              {llm.models.map((name) => (
+                                <option key={name} value={name}>{name}</option>
+                              ))}
+                            </select>
+                          </Field>
+                          <button
+                            className="primary"
+                            onClick={() => onGenerate(runModel)}
+                            disabled={busy || !runModel}
+                          >
+                            Run
+                          </button>
+                        </>
                       )}
                     </div>
 
