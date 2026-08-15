@@ -344,3 +344,23 @@ is genuinely useful and the docs were a reasonable specification.
 Note for anyone who wrote a custom provider before this: `complete` gained a
 second parameter with a default, so existing subclasses keep working, but new
 ones should accept and honour it.
+
+## 2026-08-15 17:23 EDT — Fixed: interface never loaded at the advertised URL
+
+The interface "never loaded" for Jake. Verified cause: with no `host` setting,
+Vite resolves `localhost` and binds IPv6 `[::1]` only — reproduced by starting
+the stock config and probing both families (`127.0.0.1:5173` refused,
+`[::1]:5173` answered). Every URL the project advertises — dev.sh's banner,
+the README — says `http://127.0.0.1:5173`, so following the printed URL hit a
+connection refused.
+
+Fix: `server.host: '127.0.0.1'` in `frontend/vite.config.js`, so the server
+binds exactly the address the banner prints. Confirmed by a clean `./dev.sh`
+run: frontend 200 on `127.0.0.1:5173`, `/api/health` and `/api/llm` good on
+`:8000`, and the `/api` proxy through Vite reaching the backend.
+
+Related trap found while verifying: stale dev servers from an earlier session
+were still holding :8000 and :5173, so a new `./dev.sh` failed to bind — uvicorn
+logged "Address already in use" and Vite silently moved to :5174, where the
+proxy still worked but nothing advertised the port. If the app misbehaves
+strangely, check `lsof -nP -iTCP:5173 -iTCP:8000 -sTCP:LISTEN` first.
