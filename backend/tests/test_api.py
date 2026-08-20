@@ -17,7 +17,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from fastapi.testclient import TestClient
     HAVE_FASTAPI = True
-except ImportError:  # pragma: no cover - only on a bare install
+except (ImportError, RuntimeError):  # pragma: no cover - only on a bare install
+    # RuntimeError: starlette's TestClient raises it (not ImportError) when
+    # its httpx2 transport is missing — an incomplete install, same as no
+    # FastAPI at all for these tests' purposes.
     HAVE_FASTAPI = False
 
 if HAVE_FASTAPI:

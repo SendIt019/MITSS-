@@ -419,3 +419,33 @@ code review and obvious on screen:
 Data note: screenshots were staged against a scratch backend (`MITSS_ROOT`
 pointed at a temp dir) so demo runs never touch the real append-only index and
 transcript.
+
+## 2026-08-20 07:20 HST — Review-readiness pass
+
+Jake asked for the repository to be cleaned up for external review. Every
+change below was verified by running it, per the house rule:
+
+- `backend/requirements.txt` gains `httpx2` — starlette's TestClient needs it,
+  and a reviewer following the README's install-and-test steps hit 39 API-test
+  errors without it (found the hard way on 2026-08-15).
+- The `test_api.py` import guard now catches the `RuntimeError` starlette
+  raises when httpx2 alone is missing, so "the API tests skip themselves on a
+  bare install" (backend/README.md) is true for partial installs too. Verified
+  on a clean-environment interpreter: 184 ran, 39 skipped, rest pass, zero
+  installs.
+- CI added (GitHub Actions): backend tests on an installed environment,
+  frontend production build, and a bare-interpreter job with no pip install —
+  that third job turns the "core has no third-party dependencies" invariant
+  from a claim in CLAUDE.md into something a PR cannot silently break.
+- `Timeline.jsx` deleted: the last scheduling-era component in the frontend,
+  imported by nothing since the 2026-08-10 reversal.
+- `MITSS_LLM_MODELS` added to `.env.example` — README and SANDBOX.md both
+  document it, but the file users actually copy never mentioned it.
+- `frontend/package.json` version aligned to the API's 0.3.0.
+- `.claude/settings.local.json` untracked and gitignored: per-machine
+  assistant permissions, not shared configuration.
+- GitHub repo description updated from the seed text ("I/O for Box").
+
+Flagged, not done: the repository has no LICENSE (a legal choice, Jake's to
+make) and the GitHub repo name carries a trailing hyphen (`MITSS-`), a rename
+only the owner can do.

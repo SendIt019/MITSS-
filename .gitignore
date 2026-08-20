@@ -31,3 +31,6 @@ backend/.env
 # Scratch holding pen for files staged for deletion, and transfer archives
 _to_delete/
 *.tar.gz
+
+# Per-machine assistant settings; not shared configuration.
+.claude/settings.local.json
