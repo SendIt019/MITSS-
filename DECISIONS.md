@@ -388,3 +388,34 @@ unsaved edits — are kept.
 Verified in a real browser (headless Chrome via Playwright): all seven fields
 render in order, an input created through the form appears in the library, and
 reopening it parses the stored block back into the fields. No console errors.
+
+## 2026-08-20 07:09 HST — Dark ops console theme
+
+Jake picked a permanent dark direction for the interface over a refined light
+theme or a light/dark toggle, so the light palette and the automatic
+prefers-color-scheme flip are gone: one committed look, dark slate surfaces,
+monospace chrome (card titles, tabs, labels, metadata), and a single amber
+accent reserved for interactive state — active tab, focused field, selected
+row, primary action. Amber is chrome only, never a data colour.
+
+Verdict and status colours are unchanged and were re-validated against the new
+surface (#121722): all four clear 3:1 contrast. The validator's categorical
+checks do not apply to them — verdicts never appear as adjacent series, and
+each ships a distinct glyph and label, so meaning never rests on colour.
+
+Two real bugs surfaced while verifying in the browser, both invisible in the
+code review and obvious on screen:
+
+- The generic `button:hover` rule (specificity 0-2-1) outranked every
+  specialised button state at 0-2-0 — tabs, sidebar items, and run rows are
+  all `<button>`s, so the active tab's amber underline degraded to a muddy
+  translucent mix whenever the mouse was over it. Diagnosed from the computed
+  colour's alpha (0.614 = 55% + 45%×0.14, exactly the hover colour-mix).
+  The generic rule now excludes `.tab`, `.prompt-item`, and `.run-row`.
+- A first screenshot captured mid-transition and looked like the underline was
+  stuck on the previous tab; it was not — always settle transitions before
+  reading computed styles.
+
+Data note: screenshots were staged against a scratch backend (`MITSS_ROOT`
+pointed at a temp dir) so demo runs never touch the real append-only index and
+transcript.
