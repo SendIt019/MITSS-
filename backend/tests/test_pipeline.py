@@ -171,6 +171,15 @@ class Diffing(unittest.TestCase):
         self.assertEqual("".join(s["text"] for s in result["left"]), left_text)
         self.assertEqual("".join(s["text"] for s in result["right"]), right_text)
 
+    def test_leading_whitespace_survives_reconstruction(self):
+        # An output starting with a blank line or indentation must render
+        # with it; the tokenizer once dropped anything before the first word.
+        left_text = "\n\nstarts after a blank line"
+        right_text = "   indented start"
+        result = diff_text(left_text, right_text)
+        self.assertEqual("".join(s["text"] for s in result["left"]), left_text)
+        self.assertEqual("".join(s["text"] for s in result["right"]), right_text)
+
     def test_empty_sides(self):
         result = diff_text("", "brand new output")
         self.assertEqual(result["removed_words"], 0)
@@ -245,6 +254,39 @@ class Matrix(unittest.TestCase):
         self.assertFalse(payload["same_model"])
         self.assertTrue(payload["prompt_diff"]["identical"])
         self.assertFalse(payload["output_diff"]["identical"])
+
+
+class HostileIds(unittest.TestCase):
+    """Ids arrive from URLs and become directory names. Anything the store
+    could not have minted must read as not-found, never as a path."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_unmintable_ids_raise_not_found_everywhere(self):
+        for hostile in ("..", "../..", "a/../b", "/etc", "a\\b", ".", "", "UPPER"):
+            for call in (self.store.get_prompt, self.store.get_input,
+                         self.store.get_run, self.store.delete_input,
+                         self.store.delete_run):
+                with self.assertRaises(NotFound,
+                                       msg=f"{call.__name__}({hostile!r})"):
+                    call(hostile)
+
+    def test_traversal_delete_cannot_reach_the_append_only_files(self):
+        # delete_input("..") once resolved to data/ itself and removed the
+        # event index and transcript before erroring on a subdirectory.
+        self.store.create_prompt("p", "text {input}")
+        index = os.path.join(self.store.data_dir, "index.jsonl")
+        self.assertTrue(os.path.exists(index))
+        with self.assertRaises(NotFound):
+            self.store.delete_input("..")
+        with self.assertRaises(NotFound):
+            self.store.delete_run("..")
+        self.assertTrue(os.path.exists(index))
 
 
 if __name__ == "__main__":

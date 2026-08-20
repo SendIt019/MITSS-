@@ -449,3 +449,27 @@ change below was verified by running it, per the house rule:
 Flagged, not done: the repository has no LICENSE (a legal choice, Jake's to
 make) and the GitHub repo name carries a trailing hyphen (`MITSS-`), a rename
 only the owner can do.
+
+## 2026-08-20 07:45 HST — Fixed: a ".." id could delete the append-only files
+
+A full-code audit before external review found that ids from URLs were joined
+straight into filesystem paths. `DELETE /api/inputs/%2e%2e` resolved
+`data/inputs/..` to `data/` itself and removed `index.jsonl` and
+`transcript.txt` — the two files the product promises never to rewrite —
+before erroring on the first subdirectory. Same mechanism through
+`/api/runs/{id}` and every other id-taking route. Confirmed end-to-end
+against a throwaway root before fixing.
+
+Every id the store mints comes from `slugify()` or `stamp()`, so the fix is an
+allowlist at the three path builders (`prompt_dir`, `input_dir`, `run_dir`):
+an id outside `[a-z0-9-]` raises `NotFound`, indistinguishable from a miss, so
+a probe learns nothing. Regression tests cover the store layer (hostile ids
+across get/delete for all three kinds) and the HTTP layer (encoded `..` ids
+return 404 and the index survives).
+
+Also fixed from the same audit: the diff tokenizer (`\S+\s*`) dropped a
+leading whitespace run, so an output starting with a blank line rendered in
+Compare with that line silently stripped — contradicting the documented
+"concatenating one side reproduces it exactly" contract. Leading whitespace
+is now its own token; the reconstruction test gained a leading-whitespace
+case. Suite is 188 tests, all passing.

@@ -212,7 +212,7 @@ cd backend && python -m unittest discover tests
 cd frontend && npm run build
 ```
 
-184 backend tests: the pipeline core (storage, immutable versioning, input
+188 backend tests: the pipeline core (storage, immutable versioning, input
 sets, prompt rendering, verdicts, diffing, the matrix, the transcript), the HTTP surface, the
 model harness — exercised against a real local server, including that an API
 key never reaches an error message — and the scheduling example's own suite.

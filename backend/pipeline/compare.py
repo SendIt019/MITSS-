@@ -26,7 +26,15 @@ _TOKEN = re.compile(r"\S+\s*")
 
 
 def tokenize(text: str) -> List[str]:
-    return _TOKEN.findall(text or "")
+    text = text or ""
+    tokens = _TOKEN.findall(text)
+    rebuilt = sum(map(len, tokens))
+    if rebuilt != len(text):
+        # \S+\s* cannot match a leading whitespace run, and that is the only
+        # thing it can miss. Keep it as its own token, or an output starting
+        # with a blank line would render with that line silently stripped.
+        tokens.insert(0, text[: len(text) - rebuilt])
+    return tokens
 
 
 def diff_text(before: str, after: str) -> Dict[str, Any]:

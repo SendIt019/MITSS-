@@ -214,6 +214,23 @@ class Api(unittest.TestCase):
         self.assertEqual(self.client.delete(f"/api/runs/{run['id']}").status_code, 200)
         self.assertEqual(self.client.get(f"/api/runs/{run['id']}").status_code, 404)
 
+    def test_traversal_ids_are_404_and_touch_nothing(self):
+        # A ".." id once escaped the inputs directory and deleted the
+        # append-only index and transcript out from under every other run.
+        self._run(self._prompt()["id"])
+        index = os.path.join(self.tmp.name, "data", "index.jsonl")
+        self.assertTrue(os.path.exists(index))
+        for method, path in [
+            ("delete", "/api/inputs/%2e%2e"),
+            ("delete", "/api/runs/%2e%2e"),
+            ("get", "/api/prompts/%2e%2e"),
+            ("patch", "/api/inputs/%2e%2e"),
+        ]:
+            response = getattr(self.client, method)(
+                path, **({"json": {"name": "x"}} if method == "patch" else {}))
+            self.assertEqual(response.status_code, 404, f"{method} {path}")
+        self.assertTrue(os.path.exists(index))
+
     def test_generate_with_manual_provider_is_a_conflict(self):
         prompt = self._prompt()
         response = self.client.post("/api/generate", json={"prompt_id": prompt["id"]})

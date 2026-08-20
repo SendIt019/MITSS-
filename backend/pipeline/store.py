@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -44,6 +45,23 @@ def stamp() -> str:
 
 class NotFound(Exception):
     """Raised when a prompt, version or run does not exist."""
+
+
+# Every id this store mints comes from slugify() or stamp(), so it matches
+# this pattern. Ids arrive from URLs and become directory names; anything
+# outside the minted alphabet (like "..") could escape the data directory.
+_SAFE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,127}")
+
+
+def _safe_id(identifier: str) -> str:
+    """Reject any id the store could not have minted.
+
+    Raises NotFound — the same outcome as an id that does not exist, so a
+    hostile probe learns nothing it could not learn from a miss.
+    """
+    if not isinstance(identifier, str) or not _SAFE_ID.fullmatch(identifier):
+        raise NotFound(f"no such id '{identifier}'")
+    return identifier
 
 
 class Store:
@@ -92,7 +110,7 @@ class Store:
     # -- prompts ---------------------------------------------------------
 
     def prompt_dir(self, prompt_id: str) -> str:
-        return os.path.join(self.prompts_dir, prompt_id)
+        return os.path.join(self.prompts_dir, _safe_id(prompt_id))
 
     def list_prompt_ids(self) -> List[str]:
         if not os.path.isdir(self.prompts_dir):
@@ -199,7 +217,7 @@ class Store:
     # -- input sets ------------------------------------------------------
 
     def input_dir(self, input_id: str) -> str:
-        return os.path.join(self.inputs_dir, input_id)
+        return os.path.join(self.inputs_dir, _safe_id(input_id))
 
     def list_input_ids(self) -> List[str]:
         if not os.path.isdir(self.inputs_dir):
@@ -301,7 +319,7 @@ class Store:
     # -- runs ------------------------------------------------------------
 
     def run_dir(self, run_id: str) -> str:
-        return os.path.join(self.runs_dir, run_id)
+        return os.path.join(self.runs_dir, _safe_id(run_id))
 
     def list_run_ids(self) -> List[str]:
         if not os.path.isdir(self.runs_dir):
