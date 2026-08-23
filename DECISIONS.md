@@ -473,3 +473,52 @@ Compare with that line silently stripped — contradicting the documented
 "concatenating one side reproduces it exactly" contract. Leading whitespace
 is now its own token; the reconstruction test gained a leading-whitespace
 case. Suite is 188 tests, all passing.
+
+## 2026-08-22 14:24 HST — Jake's full review: ten verified findings, all resolved
+
+Jake ran /code-review across the last five commits; eight finder angles plus
+a verification pass produced ten findings, every one empirically confirmed.
+The fixes, worst first:
+
+- **M-SALUTE round-trip gate.** Three findings (preamble text silently
+  dropped, an embedded header-looking line shuffling content between fields,
+  CRLF inputs reading as dirty on open) were one root cause: the structured
+  form would open text it could not write back. `parseSalute` now succeeds
+  only when `assembleSalute(parse(text)) === text` byte-for-byte; anything
+  else opens in the raw editor where nothing can be dropped or rewritten.
+  Verified under node for all four cases and in the browser.
+- **Hover specificity, round two.** The `:not()` exclusion chain added on
+  2026-08-20 raised the generic button hover to specificity 0-5-1 — `:not()`
+  arguments count — so it beat `button.primary:hover` and friends: hovered
+  primary buttons went dark-on-dark. The exclusions now sit inside
+  `:where()` (adds no specificity), and the two selected-state rules gained
+  a `button.` prefix to win by source order. Lesson recorded: a specificity
+  fix can reintroduce the bug one level up; verify hover states in the
+  browser, not just resting states.
+- **Escape in the title input committed the rename it should cancel** —
+  blur() fires synchronously with the stale draft closure. A ref flag now
+  marks the escape before blurring. Verified in the browser: server name
+  untouched.
+- **The documented `MITSS_LLM_MODELS` example broke dev.sh** — unquoted
+  comma-space value under `set -e` sourcing exits 127 before either server
+  starts. Quoted in `.env.example`, README, and SANDBOX.md.
+- **Whitespace tokens counted as words** in diff stats (a consequence of the
+  08-20 tokenizer fix). Word counts and similarity now ignore
+  whitespace-only tokens; `identical` compares the texts themselves.
+- **Ids outside the minted alphabet**: listing showed hand-made directories
+  that lookup then rejected. Decision: the store uniformly serves only ids
+  it could have minted — `list_*_ids` now applies the same filter as
+  `_safe_id`, so a hand-restored `My_Prompt` directory is invisible (not
+  half-visible) and its files remain untouched on disk; rename the directory
+  to a slug to bring it into the library.
+- **Drift tripwire**: a test now creates prompts/inputs/runs with hostile
+  names (over-length, unicode, punctuation, collision suffixes) and reads
+  them back, so the mint pattern and the check pattern cannot drift apart
+  unnoticed.
+- **The API-test skip guard** now re-raises RuntimeErrors that are not the
+  known missing-httpx2 case, and the full-install CI job imports TestClient
+  as its own step — a broken environment fails loudly instead of skipping
+  40 tests green.
+
+Suite is 190 tests, all passing; frontend builds; all fixes verified in a
+real browser against a scratch data root.

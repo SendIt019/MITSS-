@@ -180,6 +180,16 @@ class Diffing(unittest.TestCase):
         self.assertEqual("".join(s["text"] for s in result["left"]), left_text)
         self.assertEqual("".join(s["text"] for s in result["right"]), right_text)
 
+    def test_leading_whitespace_is_not_counted_as_a_word(self):
+        # The whitespace run is a token (so spans reconstruct) but not a
+        # word: identical words with different leading blank lines must not
+        # report an added "word" or a depressed similarity.
+        result = diff_text("foo", "\n\nfoo")
+        self.assertEqual(result["added_words"], 0)
+        self.assertEqual(result["removed_words"], 0)
+        self.assertEqual(result["similarity"], 1.0)
+        self.assertFalse(result["identical"])
+
     def test_empty_sides(self):
         result = diff_text("", "brand new output")
         self.assertEqual(result["removed_words"], 0)
@@ -275,6 +285,19 @@ class HostileIds(unittest.TestCase):
                 with self.assertRaises(NotFound,
                                        msg=f"{call.__name__}({hostile!r})"):
                     call(hostile)
+
+    def test_every_minted_id_passes_the_stores_own_guard(self):
+        # The mint (slugify/stamp in models.py) and the check (_SAFE_ID in
+        # store.py) are separate definitions; this is the tripwire if they
+        # drift. Names are chosen to stress the slug edges: over the length
+        # cap, mixed case, punctuation, non-ascii, and a collision suffix.
+        for name in ("X" * 80 + " — weird / Name!!", "Ünïcode  ~ name", "?!"):
+            prompt = self.store.create_prompt(name, "text {input}")
+            self.store.get_prompt(prompt.id)          # raises if check rejects mint
+            duplicate = self.store.create_prompt(name, "text {input}")
+            self.store.get_prompt(duplicate.id)       # the -2 suffix path
+            run = self.store.create_run(prompt.id, 1, "model-a", "out")
+            self.store.get_run(run.id)                # stamp-slug-vN composite
 
     def test_traversal_delete_cannot_reach_the_append_only_files(self):
         # delete_input("..") once resolved to data/ itself and removed the

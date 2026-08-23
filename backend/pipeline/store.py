@@ -81,6 +81,24 @@ class Store:
     # -- low level -------------------------------------------------------
 
     @staticmethod
+    def _list_ids(directory: str) -> List[str]:
+        """Directory names that are ids this store could have minted.
+
+        The same filter as _safe_id, so listing and lookup agree: a hand-made
+        directory outside the minted alphabet (say "My_Prompt") is uniformly
+        invisible to the store rather than listed but unreadable. The files
+        stay on disk, untouched and readable by hand — rename the directory
+        to a slug to bring it into the library.
+        """
+        if not os.path.isdir(directory):
+            return []
+        return sorted(
+            name for name in os.listdir(directory)
+            if _SAFE_ID.fullmatch(name)
+            and os.path.isdir(os.path.join(directory, name))
+        )
+
+    @staticmethod
     def _read_text(path: str) -> Optional[str]:
         if not os.path.exists(path):
             return None
@@ -113,12 +131,7 @@ class Store:
         return os.path.join(self.prompts_dir, _safe_id(prompt_id))
 
     def list_prompt_ids(self) -> List[str]:
-        if not os.path.isdir(self.prompts_dir):
-            return []
-        return sorted(
-            name for name in os.listdir(self.prompts_dir)
-            if os.path.isdir(os.path.join(self.prompts_dir, name))
-        )
+        return self._list_ids(self.prompts_dir)
 
     def unique_prompt_id(self, name: str) -> str:
         base = slugify(name)
@@ -220,12 +233,7 @@ class Store:
         return os.path.join(self.inputs_dir, _safe_id(input_id))
 
     def list_input_ids(self) -> List[str]:
-        if not os.path.isdir(self.inputs_dir):
-            return []
-        return sorted(
-            name for name in os.listdir(self.inputs_dir)
-            if os.path.isdir(os.path.join(self.inputs_dir, name))
-        )
+        return self._list_ids(self.inputs_dir)
 
     def unique_input_id(self, name: str) -> str:
         base = slugify(name, "input")
@@ -322,12 +330,7 @@ class Store:
         return os.path.join(self.runs_dir, _safe_id(run_id))
 
     def list_run_ids(self) -> List[str]:
-        if not os.path.isdir(self.runs_dir):
-            return []
-        return sorted(
-            name for name in os.listdir(self.runs_dir)
-            if os.path.isdir(os.path.join(self.runs_dir, name))
-        )
+        return self._list_ids(self.runs_dir)
 
     def unique_run_id(self, prompt_id: str, version: int) -> str:
         base = f"{stamp()}-{prompt_id}-v{version}"

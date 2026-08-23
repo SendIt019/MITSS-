@@ -12,8 +12,8 @@ import {
 // dropped into {input}. Editing one here does not rewrite past runs — each run
 // froze the input text it was actually given.
 //
-// Uploaded or legacy free-text inputs that don't parse as M-SALUTE fall back to
-// a plain textarea, so nothing is ever silently dropped.
+// Uploaded or legacy free-text inputs that don't round-trip as M-SALUTE fall
+// back to a plain textarea, so nothing is ever silently dropped or rewritten.
 
 export default function Inputs({ inputs, onChanged, busy, guard }) {
   const [selected, setSelected] = useState(null)

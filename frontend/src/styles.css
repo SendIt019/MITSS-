@@ -161,9 +161,13 @@ button {
   padding: 8px 14px; cursor: pointer;
   transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
 }
-/* List-row and tab buttons carry their own hover states; the generic button
-   hover must not outrank them (it is a button:hover, specificity 0-2-1). */
-button:hover:not(:disabled):not(.tab):not(.prompt-item):not(.run-row) {
+/* List-row and tab buttons carry their own hover states. The exclusions sit
+   inside :where() so they add NO specificity — this rule stays a plain
+   button:hover at 0-2-1, which button.primary/.danger hover (0-3-1) beat
+   outright and the selected-state rules below (also 0-2-1, later in the
+   file) beat by source order. Bare :not() chains would raise it to 0-5-1
+   and quietly outrank all of them. */
+button:hover:not(:disabled):where(:not(.tab):not(.prompt-item):not(.run-row)) {
   border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
   background: var(--surface-1);
 }
@@ -310,8 +314,11 @@ label.field {
 .verdict-option.partial .mark { background: var(--status-serious); color: #0b0b0b; }
 .verdict-option.inaccurate .mark { background: var(--status-critical); }
 .verdict-option.unrated .mark { background: transparent; color: var(--text-muted); border: 1px solid var(--baseline); }
-.verdict-option.on {
+/* button. prefix: ties the generic hover at 0-2-1 and wins by source order,
+   so the selected state holds its accent border under the cursor. */
+button.verdict-option.on {
   border-color: var(--accent); font-weight: 600;
+  background: var(--page);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
@@ -423,8 +430,9 @@ table.matrix th.rowhead .note {
   width: 100%; min-width: 130px; padding: 9px 11px; text-align: left;
   background: var(--page);
 }
-.cell-button.selected {
+button.cell-button.selected {
   border-color: var(--accent);
+  background: var(--page);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .cell-sub {

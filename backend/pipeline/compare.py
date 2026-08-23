@@ -48,6 +48,12 @@ def diff_text(before: str, after: str) -> Dict[str, Any]:
     right_tokens = tokenize(after)
     matcher = difflib.SequenceMatcher(None, left_tokens, right_tokens, autojunk=False)
 
+    # A leading whitespace run is a token (so spans reconstruct exactly) but
+    # not a word: it must not inflate the counts or the similarity score when
+    # two outputs differ only in leading blank lines.
+    def words(tokens: List[str], lo: int, hi: int) -> int:
+        return sum(1 for token in tokens[lo:hi] if token.strip())
+
     left_spans: List[Dict[str, str]] = []
     right_spans: List[Dict[str, str]] = []
     added = removed = same = 0
@@ -57,32 +63,39 @@ def diff_text(before: str, after: str) -> Dict[str, Any]:
         right_chunk = "".join(right_tokens[j1:j2])
 
         if tag == "equal":
-            same += i2 - i1
+            same += words(left_tokens, i1, i2)
             if left_chunk:
                 left_spans.append({"text": left_chunk, "kind": "same"})
             if right_chunk:
                 right_spans.append({"text": right_chunk, "kind": "same"})
         elif tag == "delete":
-            removed += i2 - i1
+            removed += words(left_tokens, i1, i2)
             left_spans.append({"text": left_chunk, "kind": "removed"})
         elif tag == "insert":
-            added += j2 - j1
+            added += words(right_tokens, j1, j2)
             right_spans.append({"text": right_chunk, "kind": "added"})
         else:  # replace
-            removed += i2 - i1
-            added += j2 - j1
+            removed += words(left_tokens, i1, i2)
+            added += words(right_tokens, j1, j2)
             left_spans.append({"text": left_chunk, "kind": "removed"})
             right_spans.append({"text": right_chunk, "kind": "added"})
 
-    total = same + added + removed
+    word_matcher = difflib.SequenceMatcher(
+        None,
+        [t.strip() for t in left_tokens if t.strip()],
+        [t.strip() for t in right_tokens if t.strip()],
+        autojunk=False,
+    )
     return {
         "left": left_spans,
         "right": right_spans,
         "added_words": added,
         "removed_words": removed,
         "unchanged_words": same,
-        "similarity": round(matcher.ratio(), 4),
-        "identical": added == 0 and removed == 0 and total > 0,
+        "similarity": round(word_matcher.ratio(), 4),
+        # Identity is a property of the texts, not the word counts — two
+        # outputs differing only in whitespace are similar, not identical.
+        "identical": bool(before) and before == after,
     }
 
 

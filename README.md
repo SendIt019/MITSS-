@@ -116,7 +116,7 @@ MITSS_LLM_PROVIDER=http
 MITSS_LLM_URL=http://127.0.0.1:8080/v1/chat/completions
 MITSS_LLM_FORMAT=openai        # or "raw" for {"prompt": ...}
 MITSS_LLM_MODEL=my-custom-model
-MITSS_LLM_MODELS=team-7b, team-70b     # optional: offer a choice in the interface
+MITSS_LLM_MODELS="team-7b, team-70b"   # optional: offer a choice in the interface
 ```
 
 With `MITSS_LLM_MODELS` set, the Prompt tab shows a **Run on** picker and a
@@ -212,7 +212,7 @@ cd backend && python -m unittest discover tests
 cd frontend && npm run build
 ```
 
-188 backend tests: the pipeline core (storage, immutable versioning, input
+190 backend tests: the pipeline core (storage, immutable versioning, input
 sets, prompt rendering, verdicts, diffing, the matrix, the transcript), the HTTP surface, the
 model harness — exercised against a real local server, including that an API
 key never reaches an error message — and the scheduling example's own suite.

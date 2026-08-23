@@ -43,6 +43,7 @@ export default function App() {
   const [titleDraft, setTitleDraft] = useState('')
   const titleRef = useRef(null)
   const wantTitleFocus = useRef(false)
+  const titleEscaping = useRef(false)
   const [draft, setDraft] = useState('')
   const [versionNote, setVersionNote] = useState('')
   const [viewVersion, setViewVersion] = useState(null)
@@ -350,13 +351,21 @@ export default function App() {
                   aria-label="Prompt title"
                   onChange={(event) => setTitleDraft(event.target.value)}
                   onBlur={() => {
+                    // blur() fired from onKeyDown runs before React re-renders,
+                    // so this closure would still see the abandoned draft; the
+                    // ref is how Escape actually cancels instead of committing.
+                    if (titleEscaping.current) {
+                      titleEscaping.current = false
+                      setTitleDraft(prompt.name)
+                      return
+                    }
                     const next = titleDraft.trim()
-                    if (!next) { setTitleDraft(prompt.name); return }
-                    if (next !== prompt.name) onRename(next)
+                    if (next && next !== prompt.name) onRename(next)
+                    else setTitleDraft(prompt.name)
                   }}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter') event.target.blur()
-                    if (event.key === 'Escape') { setTitleDraft(prompt.name); event.target.blur() }
+                    if (event.key === 'Escape') { titleEscaping.current = true; event.target.blur() }
                   }}
                 />
                 <div className="row">

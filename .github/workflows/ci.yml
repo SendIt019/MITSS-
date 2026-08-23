@@ -14,6 +14,9 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r backend/requirements.txt
+      # In this full-install job the API tests must RUN, not skip — a broken
+      # TestClient import would otherwise skip 40+ tests and stay green.
+      - run: python -c "from fastapi.testclient import TestClient"
       - run: python -m unittest discover tests
         working-directory: backend
 

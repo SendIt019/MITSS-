@@ -60,6 +60,12 @@ export function parseSalute(text) {
   for (const f of SALUTE_FIELDS) {
     fields[f.key] = (buckets[f.key] || []).join('\n').trim()
   }
+  // The structured form may only open what it can write back byte-for-byte.
+  // Text before the first header, a header-looking line inside a field's
+  // content, CRLF endings — any of these would survive parsing but not
+  // reassembly, so a save would silently rewrite or lose content. Those
+  // fall back to the raw editor instead, where nothing can be dropped.
+  if (assembleSalute(fields) !== text) return null
   return fields
 }
 

@@ -30,7 +30,7 @@ Example `backend/.env`:
 MITSS_LLM_PROVIDER=http
 MITSS_LLM_URL=http://127.0.0.1:8080/v1/chat/completions
 MITSS_LLM_FORMAT=openai
-MITSS_LLM_MODELS=model-a, model-b, model-c
+MITSS_LLM_MODELS="model-a, model-b, model-c"
 MITSS_LLM_API_KEY=changeme          # optional
 ```
 
