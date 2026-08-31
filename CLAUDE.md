@@ -90,12 +90,29 @@ backend/pipeline/   The product: prompts, versions, inputs, runs, matrix, diffin
 backend/mitss/      The model provider harness, plus a scheduling example kept
                     from an earlier design. The pipeline does not depend on the
                     scheduling parts.
-backend/tests/      unittest. 190 tests.
+backend/tests/      unittest. 211 tests.
 ```
+
+## The team layer (added 2026-08-31)
+
+`data/models/` holds registered models — teammates' endpoints, added via
+`POST /api/models` or the Models tab. A registration stores connection
+details only; `key_env` is the NAME of an environment variable and the
+service layer rejects anything that does not look like one. Keys must never
+reach disk or a response; there are tests on this too.
+
+`POST /api/batch` runs one version across every callable registered model.
+`GET /api/digest` (and `?format=text`) compiles verdicts by prompt, version
+and model — compilation of the operator's verdicts, which is not a violation
+of capture-only. `GET /api/runs?verdict=unrated` is the review queue.
+
+A registered model's name is immutable after registration because runs are
+labelled with it; deleting a registration must never touch its runs.
 
 ## Known gaps
 
-Batch runs (one prompt across several models in one action) do not exist. The
-matrix shows only the newest run per cell when several exist behind it. There
-is no filter for unreviewed outputs. Any of these is a reasonable thing to
-build; none is a bug.
+The matrix shows only the newest run per cell when several exist behind it.
+Batch runs are sequential — a slow model holds up the ones after it. The
+2026-08-31 interface restructure (global tabs, Models, Digest, review filter)
+was verified by production build and live API checks but not yet eyeballed in
+a browser. Any of these is a reasonable thing to pick up; none is a bug.

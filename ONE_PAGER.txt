@@ -1,0 +1,61 @@
+MITSS — ONE PAGER
+What it is, what it runs on, and how to feed it.
+(Paste this whole page into any LLM as context and it can walk you through the tool.)
+
+WHAT MITSS IS
+A prompt engineering pipeline for a team with many models and one operator.
+Teammates send in their LLMs; the operator writes prompts, runs them across
+those models, reads every output, and records a verdict. Nothing is judged
+automatically — MITSS's job is that no reading is ever wasted and that
+"which prompt version, on which model, produced this output" always has an
+exact answer.
+
+THE STACK
+Frontend  React (Vite dev server) at http://127.0.0.1:5173 — a dark ops
+          console with seven tabs: Prompt, Inputs, Outputs, Matrix, Compare,
+          Models, Digest.
+Backend   Python FastAPI at http://127.0.0.1:8000 (interactive docs at /docs)
+          over a dependency-free core. All data is plain files on disk under
+          backend/data/ — readable and greppable without the app.
+Start both with ./dev.sh.
+
+THE CYCLE
+1. WRITE   Create a prompt on the Prompt tab. Put {input} where material goes.
+           Saving an edit never overwrites — it creates version 2, 3, 4…
+           Versions are immutable forever.
+2. FEED    Add material on the Inputs tab (reusable test cases). The prompt
+           template + the input render into the exact text that gets sent.
+3. RUN     Either copy the rendered prompt, run it through any model by hand,
+           and paste the output back — or click Run on a registered model and
+           the backend calls it directly. "Run all" hits every registered
+           model at once.
+4. JUDGE   Read each output on the Outputs tab and set a verdict: accurate,
+           partly right, or inaccurate. The "To review" toggle queues what
+           you haven't read yet.
+5. COMPARE The Matrix shows versions × models, each cell coloured by the
+           worst verdict recorded. Compare shows any two outputs word-by-word.
+6. DIGEST  The Digest tab compiles everything — verdict tallies per prompt,
+           per version, per model — and exports as a plain .txt page.
+
+HOW A TEAMMATE SENDS THEIR MODEL
+Models tab → Register: a name, your name as owner, the endpoint URL, and the
+body shape ("openai" fits llama.cpp, vLLM, Ollama, LM Studio). Or over HTTP:
+  curl -X POST http://127.0.0.1:8000/api/models -H 'Content-Type: application/json' \
+    -d '{"name":"team-7b","owner":"you","url":"http://host:8080/v1/chat/completions"}'
+Never send an API key — if the endpoint needs one, give the NAME of an
+environment variable (key_env) and set it on the operator's machine. Keys are
+read at call time and are never stored, returned, or logged. No URL yet?
+Register anyway: the model is "paste-only" until the endpoint is up.
+
+WHAT THE BACKEND GUARANTEES
+- Prompt versions are write-once; every run freezes the template, the input,
+  and the rendered prompt it was actually sent.
+- transcript.txt and index.jsonl are append-only history — deleting a run
+  does not erase the fact that it happened.
+- The digest and matrix compile the operator's verdicts; the machine never
+  scores an output itself.
+
+WHAT TO GIVE THE OPERATOR
+Your model (registered as above), and for each task: the material to test on
+(any .txt), and what a correct output looks like to you — that's what the
+verdicts get measured against.

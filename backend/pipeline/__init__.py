@@ -13,10 +13,12 @@ through the provider harness in mitss.llm.
 """
 
 from .compare import build_matrix, compare_runs, diff_text
+from .digest import build_digest, digest_text
 from .models import (
     ACCURATE,
     InputSet,
     INACCURATE,
+    ModelEntry,
     PARTIAL,
     UNRATED,
     VERDICTS,
@@ -35,6 +37,7 @@ __all__ = [
     "ACCURATE",
     "INACCURATE",
     "InputSet",
+    "ModelEntry",
     "PLACEHOLDER",
     "NotFound",
     "PARTIAL",
@@ -45,9 +48,11 @@ __all__ = [
     "UNRATED",
     "VERDICTS",
     "VERDICT_LABELS",
+    "build_digest",
     "build_matrix",
     "compare_runs",
     "diff_text",
+    "digest_text",
     "has_placeholder",
     "is_verdict",
     "preview",

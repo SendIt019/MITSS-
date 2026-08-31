@@ -26,7 +26,7 @@ MAX_UPLOAD_BYTES = 2 * 1024 * 1024
 
 app = FastAPI(
     title="MITSS",
-    version="0.3.0",
+    version="0.4.0",
     description="Prompt engineering pipeline: render a prompt, capture the "
                 "output, record what you concluded, compare across versions "
                 "and models.",
@@ -98,6 +98,36 @@ class Generate(BaseModel):
     version: Optional[int] = None
     model: str = ""
     input_id: str = ""
+    model_id: str = Field("", description="A registered model to call instead "
+                                          "of the environment-configured provider")
+
+
+class Batch(BaseModel):
+    prompt_id: str
+    version: Optional[int] = None
+    input_id: str = ""
+    model_ids: List[str] = Field(default_factory=list,
+                                 description="Registered models to ask; empty "
+                                             "means every callable one")
+
+
+class NewModel(BaseModel):
+    name: str = Field(..., description="Label runs are recorded under")
+    owner: str = Field("", description="Whose model this is")
+    url: str = Field("", description="Endpoint; empty registers it paste-only")
+    format: str = Field("openai", description="openai | raw")
+    model: str = Field("", description="Name sent in the request body; defaults to the label")
+    key_env: str = Field("", description="NAME of the env var holding the key - never the key")
+    notes: str = ""
+
+
+class EditModel(BaseModel):
+    owner: Optional[str] = None
+    url: Optional[str] = None
+    format: Optional[str] = None
+    model: Optional[str] = None
+    key_env: Optional[str] = None
+    notes: Optional[str] = None
 
 
 def _guard(call, *args, **kwargs):
@@ -146,6 +176,57 @@ def transcript(limit: Optional[int] = Query(None, ge=1),
 def transcript_location():
     """Where the transcript lives on disk, for opening it outside the app."""
     return {"path": service.transcript_location()}
+
+
+@app.get("/api/digest")
+def digest(format: str = Query("json", pattern="^(json|text)$"),
+           download: bool = Query(False)):
+    """Everything recorded, rolled up by prompt, version and model.
+
+    `format=text` returns the same digest as a plain-text page — readable
+    without the tool, and compact enough to paste into a model as context.
+    """
+    if format == "text":
+        headers = ({"Content-Disposition": 'attachment; filename="mitss-digest.txt"'}
+                   if download else {})
+        return PlainTextResponse(service.digest_as_text(),
+                                 media_type="text/plain", headers=headers)
+    return service.digest()
+
+
+# --------------------------------------------------------------------------
+# registered models
+# --------------------------------------------------------------------------
+
+@app.get("/api/models")
+def list_models():
+    """Models the team has registered. Never includes a key."""
+    return {"models": service.list_models()}
+
+
+@app.post("/api/models")
+def register_model(body: NewModel):
+    """Register a teammate's model: connection details, never credentials."""
+    return _guard(service.register_model, body.name, body.owner, body.url,
+                  body.format, body.model, body.key_env, body.notes)
+
+
+@app.get("/api/models/{model_id}")
+def get_model(model_id: str):
+    return _guard(service.get_model, model_id)
+
+
+@app.patch("/api/models/{model_id}")
+def update_model(model_id: str, body: EditModel):
+    """Connection details are editable; the name is not — runs carry it."""
+    return _guard(service.update_model, model_id, body.owner, body.url,
+                  body.format, body.model, body.key_env, body.notes)
+
+
+@app.delete("/api/models/{model_id}")
+def delete_model(model_id: str):
+    """Removes the registration only; recorded runs keep its name."""
+    return _guard(service.delete_model, model_id)
 
 
 # --------------------------------------------------------------------------
@@ -267,8 +348,11 @@ def record_run(body: NewRun):
 
 @app.get("/api/runs")
 def list_runs(prompt_id: Optional[str] = None, version: Optional[int] = None,
-              model: Optional[str] = None, input_id: Optional[str] = None):
-    return {"runs": service.list_runs(prompt_id, version, model, input_id)}
+              model: Optional[str] = None, input_id: Optional[str] = None,
+              verdict: Optional[str] = None):
+    """`verdict=unrated` is the review queue: outputs nobody has read yet."""
+    return {"runs": _guard(service.list_runs, prompt_id, version, model,
+                           input_id, verdict)}
 
 
 @app.get("/api/runs/{run_id}")
@@ -289,9 +373,16 @@ def delete_run(run_id: str):
 
 @app.post("/api/generate")
 def generate(body: Generate):
-    """Call the configured provider directly. 409 when set to manual paste."""
+    """Call the configured provider or a registered model. 409 on paste-only."""
     return _guard(service.generate_run, body.prompt_id, body.version, body.model,
-                  body.input_id)
+                  body.input_id, body.model_id)
+
+
+@app.post("/api/batch")
+def batch(body: Batch):
+    """Run one prompt version across several registered models in one action."""
+    return _guard(service.batch_generate, body.prompt_id, body.version,
+                  body.input_id, body.model_ids or None)
 
 
 # --------------------------------------------------------------------------

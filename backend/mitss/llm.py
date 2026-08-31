@@ -112,10 +112,14 @@ class HttpProvider(LLMProvider):
     name = "http"
 
     def __init__(self, url: Optional[str] = None, fmt: Optional[str] = None,
-                 model: Optional[str] = None, timeout: Optional[float] = None):
+                 model: Optional[str] = None, timeout: Optional[float] = None,
+                 key_env: Optional[str] = None):
         self.url = url or os.environ.get("MITSS_LLM_URL", "")
         self.format = (fmt or os.environ.get("MITSS_LLM_FORMAT", "openai")).lower()
         self.model = model or os.environ.get("MITSS_LLM_MODEL", "local-model")
+        # Which environment variable holds the key — never the key itself, so
+        # a provider built from a stored registration still cannot persist one.
+        self.key_env = key_env or "MITSS_LLM_API_KEY"
         try:
             self.timeout = float(timeout or os.environ.get("MITSS_LLM_TIMEOUT", "120"))
         except ValueError:
@@ -152,7 +156,7 @@ class HttpProvider(LLMProvider):
             "model": self.model,
             "models": self.models,
             # Presence only. The value is never exposed.
-            "api_key_set": bool(os.environ.get("MITSS_LLM_API_KEY")),
+            "api_key_set": bool(os.environ.get(self.key_env)),
         }
 
     def complete(self, prompt: str, model: Optional[str] = None) -> str:
@@ -197,7 +201,7 @@ class HttpProvider(LLMProvider):
 
     def _headers(self) -> Dict[str, str]:
         headers = {"Content-Type": "application/json"}
-        key = os.environ.get("MITSS_LLM_API_KEY")
+        key = os.environ.get(self.key_env)
         if key:
             headers["Authorization"] = f"Bearer {key}"
         return headers

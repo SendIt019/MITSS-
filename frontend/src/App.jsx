@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
 import DiffText, { DiffLegend } from './components/DiffText'
+import Digest from './components/Digest'
 import Inputs from './components/Inputs'
 import Matrix from './components/Matrix'
+import Models from './components/Models'
 import {
   Card, CopyButton, Dropzone, Empty, Field, Stat, Tabs, Verdict, VerdictPicker,
   timeAgo,
@@ -62,6 +64,9 @@ export default function App() {
   const [runOnModel, setRunOnModel] = useState('')
   const [runNotes, setRunNotes] = useState('')
 
+  const [models, setModels] = useState([])
+  const [runRegistered, setRunRegistered] = useState('')
+
   const [compareA, setCompareA] = useState('')
   const [compareB, setCompareB] = useState('')
   const [comparison, setComparison] = useState(null)
@@ -101,6 +106,16 @@ export default function App() {
     if (body) setInputs(body.inputs)
   }, [])
 
+  const refreshModels = useCallback(async () => {
+    const body = await api.models().catch(() => null)
+    if (body) {
+      setModels(body.models)
+      const callable = body.models.filter((m) => m.callable)
+      setRunRegistered((current) =>
+        callable.some((m) => m.id === current) ? current : (callable[0]?.id || ''))
+    }
+  }, [])
+
   useEffect(() => {
     api.llm().then((body) => {
       setLlm(body)
@@ -109,7 +124,8 @@ export default function App() {
     api.transcriptLocation().then((b) => setTranscriptPath(b.path)).catch(() => {})
     refreshPrompts()
     refreshInputs()
-  }, [refreshPrompts, refreshInputs])
+    refreshModels()
+  }, [refreshPrompts, refreshInputs, refreshModels])
 
   const loadPrompt = useCallback(async (id, version) => {
     const detail = await api.prompt(id, version)
@@ -256,6 +272,26 @@ export default function App() {
       say(`Output fetched from ${chosen || 'your model'}`)
     })
 
+  const onGenerateRegistered = () =>
+    guard(async () => {
+      const entry = models.find((m) => m.id === runRegistered)
+      const run = await api.generate(prompt.id, viewVersion, '', inputId, runRegistered)
+      await refreshCurrent()
+      setOpenRun(run)
+      setTab('runs')
+      say(`Output fetched from ${entry?.name || runRegistered}`)
+    })
+
+  const onBatch = () =>
+    guard(async () => {
+      const body = await api.batch(prompt.id, viewVersion, inputId)
+      await refreshCurrent()
+      setTab('runs')
+      say(`Batch finished — ${body.recorded} recorded` +
+          (body.failed ? `, ${body.failed} failed: ` +
+            body.results.filter((r) => !r.ok).map((r) => r.model).join(', ') : ''))
+    })
+
   const onMatrixInput = (value) =>
     guard(async () => {
       setMatrixInput(value)
@@ -269,6 +305,8 @@ export default function App() {
   const tally = matrix?.totals
   const unreviewed = runs.filter((r) => r.verdict === 'unrated').length
   const chosenInput = inputs.find((i) => i.id === inputId)
+  const callableModels = models.filter((m) => m.callable)
+  const promptScoped = ['prompt', 'runs', 'matrix', 'compare'].includes(tab)
 
   const runLabel = (run) =>
     `v${run.version} · ${run.model || 'unnamed'}${run.input_name ? ` · ${run.input_name}` : ''} · ${timeAgo(run.created_at)}`
@@ -335,13 +373,40 @@ export default function App() {
         </aside>
 
         <main className="main">
-          {!prompt ? (
+          <Tabs
+            value={tab}
+            onChange={setTab}
+            items={[
+              { value: 'prompt', label: 'Prompt' },
+              { value: 'inputs', label: 'Inputs', badge: inputs.length || null },
+              { value: 'runs', label: 'Outputs', badge: runs.length || null },
+              { value: 'matrix', label: 'Matrix' },
+              { value: 'compare', label: 'Compare' },
+              { value: 'models', label: 'Models', badge: models.length || null },
+              { value: 'digest', label: 'Digest' },
+            ]}
+          />
+
+          {tab === 'models' && (
+            <Models models={models} onChanged={refreshModels} busy={busy}
+                    guard={guard} say={say} />
+          )}
+
+          {tab === 'digest' && <Digest active />}
+
+          {tab === 'inputs' && (
+            <Inputs inputs={inputs} onChanged={refreshInputs} busy={busy} guard={guard} />
+          )}
+
+          {promptScoped && !prompt && (
             <Card title="Start here" hint="Create a prompt, or drop a .txt file into the panel on the left.">
               <button className="primary" onClick={onNewPrompt} disabled={busy}>
                 New prompt
               </button>
             </Card>
-          ) : (
+          )}
+
+          {promptScoped && prompt && (
             <>
               <div className="prompt-head">
                 <input
@@ -377,18 +442,6 @@ export default function App() {
                   )}
                 </div>
               </div>
-
-              <Tabs
-                value={tab}
-                onChange={setTab}
-                items={[
-                  { value: 'prompt', label: 'Prompt' },
-                  { value: 'inputs', label: 'Inputs', badge: inputs.length || null },
-                  { value: 'runs', label: 'Outputs', badge: runs.length || null },
-                  { value: 'matrix', label: 'Matrix' },
-                  { value: 'compare', label: 'Compare' },
-                ]}
-              />
 
               {tab === 'prompt' && (
                 <>
@@ -518,6 +571,33 @@ export default function App() {
                           </button>
                         )
                       )}
+                      {callableModels.length > 0 && (
+                        <div className="run-on">
+                          <label className="field">Registered model</label>
+                          <div className="row" style={{ gap: 6 }}>
+                            <select
+                              value={runRegistered}
+                              onChange={(event) => setRunRegistered(event.target.value)}
+                            >
+                              {callableModels.map((entry) => (
+                                <option key={entry.id} value={entry.id}>
+                                  {entry.name}{entry.owner ? ` — ${entry.owner}` : ''}
+                                </option>
+                              ))}
+                            </select>
+                            <button className="primary" onClick={onGenerateRegistered}
+                                    disabled={busy || dirty}>
+                              Run
+                            </button>
+                            {callableModels.length > 1 && (
+                              <button onClick={onBatch} disabled={busy || dirty}
+                                      title="One click: this version and input against every registered model">
+                                Run all {callableModels.length}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     <label className="field" style={{ marginTop: 10 }}>Output</label>
@@ -541,10 +621,6 @@ export default function App() {
                     </div>
                   </Card>
                 </>
-              )}
-
-              {tab === 'inputs' && (
-                <Inputs inputs={inputs} onChanged={refreshInputs} busy={busy} guard={guard} />
               )}
 
               {tab === 'runs' && (
@@ -612,6 +688,7 @@ export default function App() {
 
 function RunsTab({ runs, openRun, onOpenRun, onReview, onDelete, busy, runLabel }) {
   const [notesDraft, setNotesDraft] = useState('')
+  const [onlyUnread, setOnlyUnread] = useState(false)
 
   useEffect(() => { setNotesDraft(openRun?.notes || '') }, [openRun?.id])
 
@@ -619,11 +696,29 @@ function RunsTab({ runs, openRun, onOpenRun, onReview, onDelete, busy, runLabel 
     return <Card title="Outputs"><Empty>Nothing recorded for this prompt yet.</Empty></Card>
   }
 
+  const unread = runs.filter((run) => run.verdict === 'unrated')
+  const shown = onlyUnread ? unread : runs
+
   return (
     <>
-      <Card title="Recorded outputs" tight>
+      <Card
+        title="Recorded outputs"
+        tight
+        right={
+          <button
+            className={onlyUnread ? 'primary' : ''}
+            onClick={() => setOnlyUnread(!onlyUnread)}
+            disabled={unread.length === 0 && !onlyUnread}
+          >
+            {onlyUnread ? `Showing ${unread.length} to review` : `To review: ${unread.length}`}
+          </button>
+        }
+      >
+        {shown.length === 0 && (
+          <Empty>Everything here has been reviewed.</Empty>
+        )}
         <div className="run-list">
-          {runs.map((run) => (
+          {shown.map((run) => (
             <button
               key={run.id}
               className={`run-row${openRun?.id === run.id ? ' active' : ''}`}

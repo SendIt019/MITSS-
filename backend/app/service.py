@@ -7,11 +7,15 @@ or a script. The core stays dependency-free; this layer only orchestrates.
 from __future__ import annotations
 
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional
 
-from mitss.llm import LLMError, ProviderUnavailable, get_provider
-from pipeline import NotFound, Store, build_matrix, compare_runs, diff_text
+from mitss.llm import HttpProvider, LLMError, ProviderUnavailable, get_provider
+from pipeline import (
+    NotFound, Store, build_digest, build_matrix, compare_runs, diff_text,
+    digest_text,
+)
 from pipeline.models import UNRATED, VERDICT_LABELS, VERDICTS, is_verdict
 from pipeline.render import preview as render_preview, render_prompt
 from pipeline.transcript import read as read_transcript, transcript_path
@@ -175,6 +179,75 @@ def upload_prompt(filename: str, text: str, prompt_id: Optional[str] = None,
 
 
 # --------------------------------------------------------------------------
+# registered models — how a teammate hands their model to the operator
+# --------------------------------------------------------------------------
+
+# An environment variable name, not a value. Anything that does not match is
+# almost certainly a pasted key, which must never reach disk.
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
+
+MODEL_FORMATS = ("openai", "raw")
+
+
+def _validate_model_fields(url: Optional[str], fmt: Optional[str],
+                           key_env: Optional[str]) -> None:
+    if url and not (url.startswith("http://") or url.startswith("https://")):
+        raise ServiceError("url must start with http:// or https://")
+    if fmt is not None and fmt not in MODEL_FORMATS:
+        raise ServiceError(f"format must be one of: {', '.join(MODEL_FORMATS)}")
+    if key_env and not _ENV_NAME.fullmatch(key_env):
+        raise ServiceError(
+            "key_env must be the NAME of an environment variable (like "
+            "TEAM_7B_KEY) set on the machine running the backend - never "
+            "the key itself. Keys are read at call time and never stored."
+        )
+
+
+def _model_payload(entry) -> Dict[str, Any]:
+    data = entry.summary()
+    # Presence only, resolved at request time. The value is never exposed.
+    data["key_set"] = bool(entry.key_env and os.environ.get(entry.key_env))
+    return data
+
+
+def list_models(root: Optional[str] = None) -> List[Dict[str, Any]]:
+    return [_model_payload(m) for m in store(root).list_models()]
+
+
+def register_model(name: str, owner: str = "", url: str = "",
+                   fmt: str = "openai", model: str = "", key_env: str = "",
+                   notes: str = "", root: Optional[str] = None) -> Dict[str, Any]:
+    if not (name or "").strip():
+        raise ServiceError("the model needs a name - it is the label runs are recorded under")
+    _validate_model_fields(url, fmt, key_env)
+    entry = store(root).register_model(
+        name.strip(), owner.strip(), url.strip(), fmt, model.strip(),
+        key_env.strip(), notes,
+    )
+    return _model_payload(entry)
+
+
+def get_model(model_id: str, root: Optional[str] = None) -> Dict[str, Any]:
+    return _model_payload(_found(store(root).get_model, model_id))
+
+
+def update_model(model_id: str, owner: Optional[str] = None,
+                 url: Optional[str] = None, fmt: Optional[str] = None,
+                 model: Optional[str] = None, key_env: Optional[str] = None,
+                 notes: Optional[str] = None,
+                 root: Optional[str] = None) -> Dict[str, Any]:
+    _validate_model_fields(url, fmt, key_env)
+    entry = _found(store(root).update_model, model_id, owner, url, fmt,
+                   model, key_env, notes)
+    return _model_payload(entry)
+
+
+def delete_model(model_id: str, root: Optional[str] = None) -> Dict[str, Any]:
+    _found(store(root).delete_model, model_id)
+    return {"deleted": model_id}
+
+
+# --------------------------------------------------------------------------
 # runs
 # --------------------------------------------------------------------------
 
@@ -203,9 +276,13 @@ def run_detail(run_id: str, root: Optional[str] = None) -> Dict[str, Any]:
 
 def list_runs(prompt_id: Optional[str] = None, version: Optional[int] = None,
               model: Optional[str] = None, input_id: Optional[str] = None,
+              verdict: Optional[str] = None,
               root: Optional[str] = None) -> List[Dict[str, Any]]:
+    if verdict is not None and not is_verdict(verdict):
+        raise ServiceError(f"verdict must be one of: {', '.join(VERDICTS)}")
     return [r.summary()
-            for r in store(root).list_runs(prompt_id, version, model, input_id)]
+            for r in store(root).list_runs(prompt_id, version, model, input_id,
+                                           verdict)]
 
 
 def review_run(run_id: str, verdict: Optional[str] = None,
@@ -220,14 +297,7 @@ def delete_run(run_id: str, root: Optional[str] = None) -> Dict[str, Any]:
     return {"deleted": run_id}
 
 
-def generate_run(prompt_id: str, version: Optional[int] = None, model: str = "",
-                 input_id: str = "", root: Optional[str] = None) -> Dict[str, Any]:
-    """Send the prompt to the configured provider and record what comes back.
-
-    With the default manual provider this reports a conflict, which is the
-    expected path: copy the prompt, run it yourself, paste the output back.
-    """
-    shelf = store(root)
+def _resolve_version(shelf: Store, prompt_id: str, version: Optional[int]):
     prompt = _found(shelf.get_prompt, prompt_id)
     target = version if version is not None else (prompt.latest.version if prompt.latest else None)
     if target is None:
@@ -235,29 +305,102 @@ def generate_run(prompt_id: str, version: Optional[int] = None, model: str = "",
     prompt_version = prompt.version(target)
     if prompt_version is None:
         raise ServiceError(f"prompt '{prompt_id}' has no version {target}", 404)
+    return target, prompt_version
 
-    input_text = ""
-    if input_id:
-        input_text = _found(shelf.get_input, input_id).text
-    rendered, _ = render_prompt(prompt_version.text, input_text)
 
-    provider = get_provider()
+def _fetch_and_record(shelf: Store, provider, label: str, ask_for: Optional[str],
+                      prompt_id: str, target: int, rendered: str,
+                      input_id: str) -> Dict[str, Any]:
     started = time.monotonic()
     try:
         # Pass the chosen model through, so the endpoint is actually asked for
         # it rather than the run merely being labelled with it.
-        output = provider.complete(rendered, model or None)
+        output = provider.complete(rendered, ask_for)
     except ProviderUnavailable as exc:
         raise ServiceError(str(exc), 409) from None
     except LLMError as exc:
         raise ServiceError(str(exc), 502) from None
     elapsed = int((time.monotonic() - started) * 1000)
 
-    described = provider.describe()
-    label = model or described.get("model") or provider.name
     run = shelf.create_run(prompt_id, target, label, output, source="provider",
                            duration_ms=elapsed, input_id=input_id)
     return run.to_dict()
+
+
+def generate_run(prompt_id: str, version: Optional[int] = None, model: str = "",
+                 input_id: str = "", model_id: str = "",
+                 root: Optional[str] = None) -> Dict[str, Any]:
+    """Send the prompt to a model and record what comes back.
+
+    `model_id` names a registered model, whose own endpoint is called and
+    whose name labels the run. Without it, the environment-configured provider
+    is used; with the default manual provider that reports a conflict, which
+    is the expected path: copy the prompt, run it yourself, paste it back.
+    """
+    shelf = store(root)
+    target, prompt_version = _resolve_version(shelf, prompt_id, version)
+
+    input_text = ""
+    if input_id:
+        input_text = _found(shelf.get_input, input_id).text
+    rendered, _ = render_prompt(prompt_version.text, input_text)
+
+    if model_id:
+        entry = _found(shelf.get_model, model_id)
+        if not entry.callable:
+            raise ServiceError(
+                f"'{entry.name}' is registered paste-only (no url) - copy the "
+                "rendered prompt, run it through that model, and paste the "
+                "output back under its name", 409,
+            )
+        provider = HttpProvider(url=entry.url, fmt=entry.format,
+                                model=entry.model or entry.name,
+                                key_env=entry.key_env or None)
+        return _fetch_and_record(shelf, provider, entry.name, None,
+                                 prompt_id, target, rendered, input_id)
+
+    provider = get_provider()
+    described = provider.describe()
+    label = model or described.get("model") or provider.name
+    return _fetch_and_record(shelf, provider, label, model or None,
+                             prompt_id, target, rendered, input_id)
+
+
+def batch_generate(prompt_id: str, version: Optional[int] = None,
+                   input_id: str = "", model_ids: Optional[List[str]] = None,
+                   root: Optional[str] = None) -> Dict[str, Any]:
+    """One prompt version across several registered models in one action.
+
+    With no `model_ids`, every callable registered model is asked. One model
+    failing does not stop the rest; each result says what happened, and every
+    successful call is recorded as an ordinary run.
+    """
+    shelf = store(root)
+    if model_ids:
+        entries = [_found(shelf.get_model, mid) for mid in model_ids]
+    else:
+        entries = [m for m in shelf.list_models() if m.callable]
+    if not entries:
+        raise ServiceError(
+            "no callable registered models - register one with a url on the "
+            "Models tab first", 409,
+        )
+
+    results = []
+    for entry in entries:
+        try:
+            run = generate_run(prompt_id, version, input_id=input_id,
+                               model_id=entry.id, root=root)
+            results.append({"model_id": entry.id, "model": entry.name,
+                            "ok": True, "run_id": run["id"]})
+        except ServiceError as exc:
+            results.append({"model_id": entry.id, "model": entry.name,
+                            "ok": False, "error": exc.message})
+    return {
+        "results": results,
+        "recorded": sum(1 for r in results if r["ok"]),
+        "failed": sum(1 for r in results if not r["ok"]),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -317,6 +460,17 @@ def compare_versions(prompt_id: str, a: int, b: int,
 
 def llm_status() -> Dict[str, Any]:
     return get_provider().describe()
+
+
+def digest(root: Optional[str] = None) -> Dict[str, Any]:
+    """Everything recorded, rolled up by prompt, version and model."""
+    shelf = store(root)
+    return build_digest(shelf.list_prompts(), shelf.list_runs(),
+                        shelf.list_models())
+
+
+def digest_as_text(root: Optional[str] = None) -> str:
+    return digest_text(digest(root))
 
 
 def verdict_options() -> List[Dict[str, str]]:

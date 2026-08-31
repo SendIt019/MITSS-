@@ -522,3 +522,48 @@ The fixes, worst first:
 
 Suite is 190 tests, all passing; frontend builds; all fixes verified in a
 real browser against a scratch data root.
+
+## 2026-08-31 17:55 EDT — The team layer: registry, batch, digest, review queue
+
+The harness assumed one operator and one model configuration. The team now
+sends models in, so four things were built, all on the existing invariants:
+
+- **Model registry** (`data/models/`, `/api/models`, Models tab). A teammate
+  hands over connection details — name, owner, URL, body shape — and their
+  model becomes a run choice, a matrix column, and part of batch runs.
+  Decision: a registration can never hold a credential. `key_env` stores the
+  NAME of an environment variable, the service layer rejects values that do
+  not look like one (a pasted `sk-…` key is refused with an explanation),
+  and the API reports presence only. Decision: the name is immutable after
+  registration — runs are labelled with it, and renaming would detach every
+  recorded run from its column. Deleting a registration leaves its runs
+  untouched.
+- **Batch runs** (`/api/batch`, "Run all" button) — the known gap closed.
+  Sequential on purpose: stdlib urllib, no async machinery, and each result
+  reports ok/failed so one dead endpoint does not sink the batch.
+- **Digest** (`/api/digest`, Digest tab). Everything rolled up by prompt,
+  version and model, in JSON and as a plain-text page (`?format=text`)
+  mirroring the transcript's philosophy: readable without the tool,
+  pasteable into a model as context. It compiles the operator's verdicts and
+  judges nothing itself, so capture-only stands.
+- **Review queue** (`verdict` filter on `/api/runs`, "To review" toggle on
+  the Outputs tab) — the other known gap closed.
+
+Interface decision: tabs became global navigation. Models, Digest and Inputs
+are library-level, not prompt-level, so they now work with no prompt
+selected; Prompt/Outputs/Matrix/Compare still ask you to pick one. The
+provider `Run on` picker (env-configured) and the Registered picker coexist:
+the env path is one shared endpoint, the registry is per-teammate.
+
+`HttpProvider` gained a `key_env` parameter (default `MITSS_LLM_API_KEY`,
+so existing configuration is unchanged) — a provider built from a stored
+registration reads that variable at call time, same rule as before.
+
+Verified: 211 tests pass (21 new — registry storage and API, key rejection,
+key non-leak, batch against a real stub server including auth header and
+body-model assertions, digest build/text/empty, verdict filters); every new
+endpoint exercised with curl against a live uvicorn on a scratch root, with
+the stub echoing back which model name and auth header it actually received.
+The frontend builds clean. NOT yet verified: the restructured interface in a
+real browser — no browser was available this session; recorded as a known
+gap rather than claimed.

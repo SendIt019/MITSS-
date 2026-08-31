@@ -218,6 +218,52 @@ class Run:
         return cls(**{k: v for k, v in data.items() if k in known})
 
 
+@dataclass
+class ModelEntry:
+    """A model someone on the team has registered with the harness.
+
+    A registration is connection details, not credentials: `key_env` is the
+    NAME of an environment variable the operator sets on the machine running
+    the backend. The key itself is never written to disk, and this dataclass
+    has nowhere to put one.
+
+    An entry with no `url` is paste-only: it exists so runs are labelled
+    consistently and the matrix has a column, but the operator carries the
+    prompt to the model by hand.
+    """
+
+    id: str
+    name: str                     # the label runs are recorded under
+    owner: str = ""               # whose model this is
+    url: str = ""                 # empty means paste-only
+    format: str = "openai"        # openai | raw, same as the http provider
+    model: str = ""               # name sent in the request body; defaults to name
+    key_env: str = ""             # env var name holding the key, never the key
+    notes: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+    @property
+    def callable(self) -> bool:
+        """True if the backend can reach this model itself."""
+        return bool(self.url)
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "owner": self.owner,
+            "url": self.url,
+            "format": self.format,
+            "model": self.model or self.name,
+            "key_env": self.key_env,
+            "notes": self.notes,
+            "callable": self.callable,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
 def slugify(text: str, fallback: str = "prompt") -> str:
     """Filesystem-safe, human-readable identifier."""
     cleaned = re.sub(r"[^a-z0-9]+", "-", (text or "").strip().lower()).strip("-")

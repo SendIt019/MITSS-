@@ -128,6 +128,50 @@ The `openai` shape works with llama.cpp, vLLM, Ollama and LM Studio unchanged.
 For anything else, subclass `LLMProvider` in `backend/mitss/llm.py` and call
 `register_provider("myname", MyProvider)`.
 
+## Team models
+
+The environment variables above configure one provider for the whole backend.
+The **Models** tab is the many-models version: each teammate registers their
+model once — a name, who owns it, the endpoint URL, the body shape — and it
+becomes a **Registered model** choice on the Prompt tab, a column in the
+matrix, and part of every batch run. Registering over HTTP works too:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/models \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "team-7b", "owner": "alex",
+       "url": "http://10.0.0.5:8080/v1/chat/completions",
+       "format": "openai", "model": "team-7b-q4",
+       "key_env": "TEAM_7B_KEY"}'
+```
+
+A registration is connection details, never credentials: `key_env` is the
+*name* of an environment variable set on the machine running the backend, and
+a value that looks like a key rather than a variable name is refused outright.
+The API reports whether that variable is set, never what it holds.
+
+An entry with no URL is **paste-only**: the backend cannot call it, but runs
+pasted back under its name stay consistently labelled, so it still gets a
+matrix column. Names are fixed after registration for the same reason —
+recorded runs carry them.
+
+**Run all** appears next to the registered-model picker once two or more
+callable models are registered: one click sends the current version and input
+to every one of them, records each reply as an ordinary run, and reports
+which models failed without stopping the rest.
+
+## The digest
+
+The **Digest** tab — and `GET /api/digest` — rolls everything recorded up by
+prompt, version and model: verdict tallies, per-model records across every
+prompt, and the review queue of outputs nobody has read yet. It compiles your
+verdicts; it never judges an output itself.
+
+`GET /api/digest?format=text` is the same digest as a plain-text page,
+downloadable from the tab, readable without the tool, and compact enough to
+paste into a model as context. `GET /api/runs?verdict=unrated` is the review
+queue on its own.
+
 Credentials are read from the environment at call time, sent once in the
 request header, and never logged, returned by the API, or written into stored
 data. `GET /api/llm` reports whether a key is present, never its value.
@@ -144,6 +188,8 @@ backend/data/
   inputs/<input-id>/
     input.json        name, note, timestamps
     input.txt         the material
+  models/<model-id>/
+    model.json        a registered model: details, never credentials
   runs/<run-id>/
     run.json          model, input, verdict, notes, timestamps
     template.txt      the prompt version used
@@ -181,9 +227,16 @@ erase the fact that it happened.
 | `POST` | `/api/inputs` | create an input set |
 | `PATCH` | `/api/inputs/{id}` | edit an input set |
 | `GET` | `/api/prompts/{id}/preview` | the rendered prompt for a version and input |
+| `GET` | `/api/models` | the team's registered models |
+| `POST` | `/api/models` | register a model (details, never credentials) |
+| `PATCH` | `/api/models/{id}` | edit a registration (the name is fixed) |
+| `DELETE` | `/api/models/{id}` | remove a registration; its runs remain |
 | `POST` | `/api/runs` | record an output |
+| `GET` | `/api/runs?verdict=unrated` | the review queue |
 | `PATCH` | `/api/runs/{id}` | set your verdict and notes |
-| `POST` | `/api/generate` | call the configured model directly |
+| `POST` | `/api/generate` | call the configured or a registered model |
+| `POST` | `/api/batch` | one version across every registered model |
+| `GET` | `/api/digest` | everything rolled up (`?format=text` for the page) |
 | `GET` | `/api/prompts/{id}/matrix` | versions against models, optionally per input |
 | `GET` | `/api/compare?a=&b=` | word-level diff of two outputs |
 | `GET` | `/api/activity` | the append-only event log |
@@ -212,10 +265,11 @@ cd backend && python -m unittest discover tests
 cd frontend && npm run build
 ```
 
-190 backend tests: the pipeline core (storage, immutable versioning, input
-sets, prompt rendering, verdicts, diffing, the matrix, the transcript), the HTTP surface, the
-model harness — exercised against a real local server, including that an API
-key never reaches an error message — and the scheduling example's own suite.
+211 backend tests: the pipeline core (storage, immutable versioning, input
+sets, prompt rendering, verdicts, diffing, the matrix, the transcript, the
+model registry, the digest), the HTTP surface, the model harness and batch
+runs — exercised against a real local server, including that an API key never
+reaches an error message or disk — and the scheduling example's own suite.
 
 ## Design notes
 

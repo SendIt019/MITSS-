@@ -494,3 +494,21 @@ code {
 /* Run-on model picker, shown when a provider reports available models */
 .run-on { display: flex; flex-direction: column; }
 .run-on select { min-width: 150px; font-family: var(--mono); font-size: 12.5px; }
+
+/* ---------- team models and digest ---------- */
+
+.mono { font-family: var(--mono); font-size: 0.95em; }
+
+/* A registry row is information plus buttons, not one clickable target */
+.model-row { cursor: default; }
+.model-row:hover { background: transparent; }
+.model-row .run-main { min-width: 0; overflow-wrap: anywhere; }
+
+.digest-rows { display: flex; flex-direction: column; gap: 2px; }
+.digest-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  gap: 12px; padding: 5px 10px; border-radius: var(--radius-sm);
+}
+.digest-row:nth-child(odd) { background: var(--page); }
+
+.counts { display: inline-flex; gap: 10px; flex-wrap: wrap; }

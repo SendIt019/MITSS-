@@ -54,15 +54,31 @@ export const api = {
   },
 
   recordRun: (payload) => request('/api/runs', json('POST', payload)),
-  runs: (promptId) =>
-    request(`/api/runs${promptId ? `?prompt_id=${promptId}` : ''}`),
+  runs: (promptId, verdict) =>
+    request(`/api/runs?${new URLSearchParams({
+      ...(promptId ? { prompt_id: promptId } : {}),
+      ...(verdict ? { verdict } : {}),
+    })}`),
   run: (id) => request(`/api/runs/${id}`),
   review: (id, verdict, notes) =>
     request(`/api/runs/${id}`, json('PATCH', { verdict, notes })),
   deleteRun: (id) => request(`/api/runs/${id}`, { method: 'DELETE' }),
-  generate: (promptId, version, model, inputId = '') =>
+  generate: (promptId, version, model, inputId = '', modelId = '') =>
     request('/api/generate', json('POST',
-      { prompt_id: promptId, version, model, input_id: inputId })),
+      { prompt_id: promptId, version, model, input_id: inputId, model_id: modelId })),
+  batch: (promptId, version, inputId = '', modelIds = []) =>
+    request('/api/batch', json('POST',
+      { prompt_id: promptId, version, input_id: inputId, model_ids: modelIds })),
+
+  models: () => request('/api/models'),
+  registerModel: (payload) => request('/api/models', json('POST', payload)),
+  updateModel: (id, patch) => request(`/api/models/${id}`, json('PATCH', patch)),
+  deleteModel: (id) => request(`/api/models/${id}`, { method: 'DELETE' }),
+
+  digest: () => request('/api/digest'),
+  digestText: () => request('/api/digest?format=text'),
+  digestUrl: (download = true) =>
+    `${BASE}/api/digest?format=text${download ? '&download=true' : ''}`,
 
   inputs: () => request('/api/inputs'),
   input: (id) => request(`/api/inputs/${id}`),

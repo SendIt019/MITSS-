@@ -28,7 +28,9 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from .models import InputSet, Prompt, PromptVersion, Run, UNRATED, slugify
+from .models import (
+    InputSet, ModelEntry, Prompt, PromptVersion, Run, UNRATED, slugify,
+)
 from .render import render_prompt
 from . import transcript
 
@@ -71,12 +73,14 @@ class Store:
         self.prompts_dir = os.path.join(self.data_dir, "prompts")
         self.runs_dir = os.path.join(self.data_dir, "runs")
         self.inputs_dir = os.path.join(self.data_dir, "inputs")
+        self.models_dir = os.path.join(self.data_dir, "models")
         self.ensure()
 
     def ensure(self) -> None:
         os.makedirs(self.prompts_dir, exist_ok=True)
         os.makedirs(self.runs_dir, exist_ok=True)
         os.makedirs(self.inputs_dir, exist_ok=True)
+        os.makedirs(self.models_dir, exist_ok=True)
 
     # -- low level -------------------------------------------------------
 
@@ -324,6 +328,106 @@ class Store:
             seen.append({"id": key, "name": run.input_name or "no input"})
         return seen
 
+    # -- registered models ----------------------------------------------
+
+    def model_dir(self, model_id: str) -> str:
+        return os.path.join(self.models_dir, _safe_id(model_id))
+
+    def list_model_ids(self) -> List[str]:
+        return self._list_ids(self.models_dir)
+
+    def unique_model_id(self, name: str) -> str:
+        base = slugify(name, "model")
+        candidate = base
+        counter = 2
+        while os.path.exists(self.model_dir(candidate)):
+            candidate = f"{base}-{counter}"
+            counter += 1
+        return candidate
+
+    def register_model(self, name: str, owner: str = "", url: str = "",
+                       fmt: str = "openai", model: str = "", key_env: str = "",
+                       notes: str = "") -> ModelEntry:
+        model_id = self.unique_model_id(name)
+        created = now()
+        entry = ModelEntry(
+            id=model_id, name=name or model_id, owner=owner, url=url,
+            format=fmt, model=model, key_env=key_env, notes=notes,
+            created_at=created, updated_at=created,
+        )
+        self._write_json(os.path.join(self.model_dir(model_id), "model.json"),
+                         entry.summary())
+        self.append_event({"event": "model_registered", "model_id": model_id,
+                           "name": entry.name, "owner": owner,
+                           "callable": entry.callable})
+        return entry
+
+    def get_model(self, model_id: str) -> ModelEntry:
+        meta = self._read_json(os.path.join(self.model_dir(model_id), "model.json"))
+        if meta is None:
+            raise NotFound(f"no registered model '{model_id}'")
+        return ModelEntry(
+            id=meta["id"],
+            name=meta.get("name", meta["id"]),
+            owner=meta.get("owner", ""),
+            url=meta.get("url", ""),
+            format=meta.get("format", "openai"),
+            model=meta.get("model", ""),
+            key_env=meta.get("key_env", ""),
+            notes=meta.get("notes", ""),
+            created_at=meta.get("created_at", ""),
+            updated_at=meta.get("updated_at", meta.get("created_at", "")),
+        )
+
+    def update_model(self, model_id: str, owner: Optional[str] = None,
+                     url: Optional[str] = None, fmt: Optional[str] = None,
+                     model: Optional[str] = None, key_env: Optional[str] = None,
+                     notes: Optional[str] = None) -> ModelEntry:
+        """Connection details are editable; the name is not.
+
+        Runs are labelled with the entry's name, so renaming it would detach
+        every recorded run from its column in the matrix. Register a new entry
+        instead.
+        """
+        entry = self.get_model(model_id)
+        if owner is not None:
+            entry.owner = owner
+        if url is not None:
+            entry.url = url
+        if fmt is not None:
+            entry.format = fmt
+        if model is not None:
+            entry.model = model
+        if key_env is not None:
+            entry.key_env = key_env
+        if notes is not None:
+            entry.notes = notes
+        entry.updated_at = now()
+        self._write_json(os.path.join(self.model_dir(model_id), "model.json"),
+                         entry.summary())
+        self.append_event({"event": "model_updated", "model_id": model_id})
+        return entry
+
+    def delete_model(self, model_id: str) -> None:
+        """Removing a registration never touches the runs recorded under it."""
+        directory = self.model_dir(model_id)
+        if not os.path.isdir(directory):
+            raise NotFound(f"no registered model '{model_id}'")
+        for name in os.listdir(directory):
+            os.remove(os.path.join(directory, name))
+        os.rmdir(directory)
+        self.append_event({"event": "model_deleted", "model_id": model_id})
+
+    def list_models(self) -> List[ModelEntry]:
+        out = []
+        for model_id in self.list_model_ids():
+            try:
+                out.append(self.get_model(model_id))
+            except NotFound:
+                continue
+        out.sort(key=lambda m: m.created_at or "")
+        return out
+
     # -- runs ------------------------------------------------------------
 
     def run_dir(self, run_id: str) -> str:
@@ -415,7 +519,8 @@ class Store:
     def list_runs(self, prompt_id: Optional[str] = None,
                   version: Optional[int] = None,
                   model: Optional[str] = None,
-                  input_id: Optional[str] = None) -> List[Run]:
+                  input_id: Optional[str] = None,
+                  verdict: Optional[str] = None) -> List[Run]:
         runs = []
         for run_id in self.list_run_ids():
             try:
@@ -429,6 +534,8 @@ class Store:
             if model and run.model != model:
                 continue
             if input_id is not None and run.input_id != input_id:
+                continue
+            if verdict and run.verdict != verdict:
                 continue
             runs.append(run)
         runs.sort(key=lambda r: r.created_at or "", reverse=True)
