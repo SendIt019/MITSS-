@@ -135,6 +135,9 @@ class EditModel(BaseModel):
     settings: Optional[Dict[str, Any]] = Field(
         None, description="Replaces the whole settings block; {} clears it; "
                           "omit to leave it alone")
+    quarantine: str | None = Field(
+        None, description="Why this model is kept out of runs; \"\" lifts "
+                          "the quarantine; omit to leave it alone")
 
 
 def _guard(call, *args, **kwargs):
@@ -229,7 +232,7 @@ def update_model(model_id: str, body: EditModel):
     """Connection details are editable; the name is not — runs carry it."""
     return _guard(service.update_model, model_id, body.owner, body.url,
                   body.format, body.model, body.key_env, body.notes,
-                  body.settings)
+                  body.settings, body.quarantine)
 
 
 @app.delete("/api/models/{model_id}")

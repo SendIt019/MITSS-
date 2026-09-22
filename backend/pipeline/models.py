@@ -266,6 +266,10 @@ class ModelEntry:
     # presence_penalty, max_tokens, seed, timeout, chat_template_kwargs).
     # Empty means the harness defaults: temperature 0 and MITSS_LLM_TIMEOUT.
     settings: Dict[str, Any] = field(default_factory=dict)
+    # Why this model is kept out of runs, e.g. a tokenizer the server loads
+    # wrongly. Empty means not quarantined. It lives on the registration so
+    # the reason travels into every batch result that skips it.
+    quarantine: str = ""
 
     @property
     def callable(self) -> bool:
@@ -283,6 +287,7 @@ class ModelEntry:
             "key_env": self.key_env,
             "notes": self.notes,
             "settings": dict(self.settings),
+            "quarantine": self.quarantine,
             "callable": self.callable,
             "created_at": self.created_at,
             "updated_at": self.updated_at,

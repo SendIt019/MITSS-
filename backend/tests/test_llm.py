@@ -12,14 +12,17 @@ import sys
 import threading
 import time
 import unittest
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from model_folders import use_fake_models_dir
 
 from mitss.llm import (
     HttpProvider,
     LLMConfigError,
     LLMError,
+    LLMModelUnavailable,
     LLMProvider,
     LLMServerError,
     LLMStuck,
@@ -30,11 +33,14 @@ from mitss.llm import (
     available_providers,
     describe_settings,
     get_provider,
+    is_local_url,
+    models_dir,
     normalize_settings,
     parse_preflight_timeout,
     redact,
     parse_timeout,
     register_provider,
+    resolve_model_path,
 )
 
 # What the stub server should reply with, set per test. `delay` (seconds)
@@ -96,6 +102,7 @@ class Http(unittest.TestCase):
         os.environ.pop("MITSS_LLM_PREFLIGHT_TIMEOUT", None)
         RECEIVED.clear()
         REPLY["delay"] = 0
+        self.models_dir = use_fake_models_dir(self)
 
     def test_unavailable_without_a_url(self):
         provider = HttpProvider()
@@ -113,7 +120,8 @@ class Http(unittest.TestCase):
             self.assertTrue(provider.available)
             self.assertEqual(provider.complete("packet text"), "the schedule")
 
-        self.assertEqual(RECEIVED["body"]["model"], "my-model")
+        self.assertEqual(RECEIVED["body"]["model"],
+                         os.path.join(self.models_dir, "my-model"))
         self.assertEqual(RECEIVED["body"]["messages"][0]["content"], "packet text")
 
     def test_raw_shape_round_trip(self):
@@ -221,7 +229,7 @@ class Http(unittest.TestCase):
         with StubServer() as url:
             HttpProvider(url=url, model="m", settings={"max_tokens": 500}).complete("real")
         probe, real = RECEIVED["bodies"]
-        self.assertEqual(probe["model"], "m")
+        self.assertEqual(probe["model"], os.path.join(self.models_dir, "m"))
         self.assertEqual(probe["max_tokens"], 1)
         self.assertEqual(probe["messages"][0]["content"], "ping")
         self.assertEqual(real["messages"][0]["content"], "real")
@@ -336,14 +344,16 @@ class Http(unittest.TestCase):
         with StubServer() as url:
             HttpProvider(url=url, fmt="raw", model="default-model").complete(
                 "x", model="team-70b")
-        self.assertEqual(RECEIVED["body"]["model"], "team-70b")
+        self.assertEqual(RECEIVED["body"]["model"],
+                         os.path.join(self.models_dir, "team-70b"))
 
     def test_model_argument_falls_back_to_the_configured_default(self):
         REPLY["status"] = 200
         REPLY["body"] = json.dumps({"completion": "ok"})
         with StubServer() as url:
             HttpProvider(url=url, fmt="raw", model="default-model").complete("x")
-        self.assertEqual(RECEIVED["body"]["model"], "default-model")
+        self.assertEqual(RECEIVED["body"]["model"],
+                         os.path.join(self.models_dir, "default-model"))
 
     def test_models_list_is_parsed_in_order_without_duplicates(self):
         os.environ["MITSS_LLM_MODELS"] = " team-7b , team-70b ,team-7b, "
@@ -365,16 +375,17 @@ class Http(unittest.TestCase):
 
     # -- what is sent, by default and with settings -----------------------
 
-    def test_default_body_is_temperature_zero_and_nothing_else(self):
-        # The pre-settings behaviour, pinned: no max_tokens, no sampling
-        # fields, so the server's own caps are the only ones that apply.
+    def test_default_body_is_temperature_zero_and_the_default_token_cap(self):
+        # Every request carries a cap now (MITSS_MAX_TOKENS, default 1024);
+        # sampling fields stay absent unless a model's settings add them.
         REPLY["status"] = 200
         REPLY["body"] = json.dumps({"completion": "ok"})
         with StubServer() as url:
             HttpProvider(url=url).complete("x")
         body = RECEIVED["body"]
         self.assertEqual(body["temperature"], 0)
-        for absent in ("max_tokens", "top_p", "top_k", "seed",
+        self.assertEqual(body["max_tokens"], 1024)
+        for absent in ("top_p", "top_k", "seed",
                        "chat_template_kwargs", "timeout"):
             self.assertNotIn(absent, body)
 
@@ -509,6 +520,258 @@ class Http(unittest.TestCase):
         self.assertIn("HTTP 500", message)
         self.assertIn("Resource limit exceeded", message)
         self.assertNotIn("super-secret-value", message)
+
+
+# -- streaming ------------------------------------------------------------
+
+# Per-attempt scripts for the streaming stub: a list of (pause, bytes) to write
+# after the headers. SCRIPT["attempts"][n] is used for the n-th request (the
+# last one repeats). "status" other than 200 sends that status and no stream.
+SCRIPT = {"attempts": [], "status": 200}
+SEEN = {"count": 0, "bodies": []}
+
+
+def _sse(chunk):
+    return f"data: {json.dumps(chunk)}\n\n".encode()
+
+
+def _delta(content=None, reasoning=None, finish=None):
+    delta = {"role": "assistant"}
+    if content is not None:
+        delta["content"] = content
+    if reasoning is not None:
+        delta["reasoning"] = reasoning
+    return _sse({"model": "/served/path", "choices": [
+        {"index": 0, "delta": delta, "finish_reason": finish}]})
+
+
+DONE = b"data: [DONE]\n\n"
+
+
+class _StreamHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        SEEN["bodies"].append(json.loads(self.rfile.read(length).decode("utf-8")))
+        attempt = SEEN["count"]
+        SEEN["count"] += 1
+        if SCRIPT["status"] != 200:
+            self.send_response(SCRIPT["status"])
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"error": "No such file or directory"}')
+            return
+        attempts = SCRIPT["attempts"]
+        events = attempts[min(attempt, len(attempts) - 1)]
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        self.wfile.flush()
+        try:
+            for pause, data in events:
+                if pause:
+                    time.sleep(pause)
+                self.wfile.write(data)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the client gave up, as a timed-out client should
+
+    def log_message(self, *args):
+        pass
+
+
+class StreamServer:
+    def __enter__(self):
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _StreamHandler)
+        self.server.daemon_threads = True
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        return f"http://127.0.0.1:{self.server.server_port}/v1/chat/completions"
+
+    def __exit__(self, *exc):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class Streaming(unittest.TestCase):
+    """Streaming, the idle-gap timeout, retries, token caps and model paths."""
+
+    def setUp(self):
+        for key in ("MITSS_LLM_URL", "MITSS_LLM_API_KEY", "MITSS_LLM_TIMEOUT",
+                    "MITSS_MAX_TOKENS"):
+            os.environ.pop(key, None)
+        os.environ["MITSS_LLM_PREFLIGHT_TIMEOUT"] = "0"
+        self.addCleanup(os.environ.pop, "MITSS_LLM_PREFLIGHT_TIMEOUT", None)
+        self.addCleanup(os.environ.pop, "MITSS_MAX_TOKENS", None)
+        self.models_dir = use_fake_models_dir(self)
+        SCRIPT["attempts"] = []
+        SCRIPT["status"] = 200
+        SEEN["count"] = 0
+        SEEN["bodies"] = []
+        self._delay = HttpProvider.retry_delay
+        HttpProvider.retry_delay = 0
+        self.addCleanup(setattr, HttpProvider, "retry_delay", self._delay)
+
+    def _whole_answer(self, pause=0.0):
+        return [
+            (0, b": keepalive 2048/3922\n\n"),
+            (pause, _delta(reasoning="Think ")),
+            (pause, _delta(reasoning="first.")),
+            (pause, _delta(content="The ")),
+            (pause, _delta(content="answer.")),
+            (pause, _delta(content="", finish="stop")),
+            (0, _sse({"choices": [], "usage": {"prompt_tokens": 3922,
+                                               "completion_tokens": 4,
+                                               "total_tokens": 3926}})),
+            (0, DONE),
+        ]
+
+    def test_stream_deltas_accumulate_into_one_completion(self):
+        SCRIPT["attempts"] = [self._whole_answer()]
+        with StreamServer() as url:
+            completion = HttpProvider(url=url, model="my-model").generate("q")
+        self.assertEqual(completion.text, "The answer.")
+        self.assertEqual(completion.reasoning, "Think first.")
+        self.assertEqual(completion.usage, {
+            "prompt_tokens": 3922, "completion_tokens": 4, "total_tokens": 3926,
+            "finish_reason": "stop", "model_reported": "/served/path"})
+        body = SEEN["bodies"][0]
+        self.assertIs(body["stream"], True)
+        self.assertEqual(body["stream_options"], {"include_usage": True})
+        # Transport fields are not generation settings; the snapshot a run
+        # keeps is unchanged in shape.
+        self.assertEqual(completion.settings,
+                         {"temperature": 0, "max_tokens": 1024, "timeout": 120.0})
+
+    def test_idle_timeout_measures_the_gap_not_the_total(self):
+        # Six chunks 0.3 s apart take ~1.8 s in total - far past a 0.6 s
+        # limit - but no single gap reaches it, so nothing is cut off.
+        SCRIPT["attempts"] = [self._whole_answer(pause=0.3)]
+        with StreamServer() as url:
+            started = time.monotonic()
+            completion = HttpProvider(url=url, timeout=0.6).generate("q")
+            took = time.monotonic() - started
+        self.assertEqual(completion.text, "The answer.")
+        self.assertGreater(took, 0.6)
+        self.assertEqual(SEEN["count"], 1)
+
+    def test_stalled_stream_is_an_idle_timeout_retried_once(self):
+        SCRIPT["attempts"] = [[(0, _delta(content="The ")), (2.0, DONE)]]
+        with StreamServer() as url, self.assertRaises(LLMTimeout) as caught:
+            HttpProvider(url=url, timeout=0.3).generate("q")
+        self.assertEqual(SEEN["count"], 2)   # the first try and one retry
+        self.assertIn("did not answer within 0.3s of its last output",
+                      str(caught.exception))
+
+    def test_one_retry_recovers_from_a_timeout(self):
+        SCRIPT["attempts"] = [[(2.0, DONE)], self._whole_answer()]
+        with StreamServer() as url:
+            completion = HttpProvider(url=url, timeout=0.3).generate("q")
+        self.assertEqual(completion.text, "The answer.")
+        self.assertEqual(SEEN["count"], 2)
+
+    def test_a_stream_that_ends_early_is_a_dropped_connection_retried_once(self):
+        SCRIPT["attempts"] = [[(0, _delta(content="The "))]]   # no finish, no DONE
+        with StreamServer() as url, self.assertRaises(LLMUnreachable):
+            HttpProvider(url=url).generate("q")
+        self.assertEqual(SEEN["count"], 2)
+
+    def test_404_is_not_retried(self):
+        SCRIPT["status"] = 404
+        with StreamServer() as url, self.assertRaises(LLMServerError) as caught:
+            HttpProvider(url=url).generate("q")
+        self.assertEqual(caught.exception.status_code, 404)
+        self.assertIn("No such file or directory", str(caught.exception))
+        self.assertEqual(SEEN["count"], 1)
+
+    def test_404_on_the_preflight_is_not_retried_either(self):
+        os.environ["MITSS_LLM_PREFLIGHT_TIMEOUT"] = "5"
+        SCRIPT["status"] = 404
+        with StreamServer() as url, self.assertRaises(LLMServerError):
+            HttpProvider(url=url).generate("q")
+        self.assertEqual(SEEN["count"], 1)   # the probe only; the prompt never went
+
+    def test_refused_connection_is_retried_then_reported(self):
+        provider = HttpProvider(url="http://127.0.0.1:9/v1/chat/completions")
+        with self.assertRaises(LLMUnreachable) as caught:
+            provider.generate("q")
+        self.assertIn("connection refused", str(caught.exception))
+
+    def test_connect_has_its_own_ten_second_limit(self):
+        provider = HttpProvider(url="http://127.0.0.1:9/v1", timeout=600)
+        self.assertEqual(provider.connect_timeout, 10.0)
+        self.assertEqual(provider.timeout, 600.0)
+
+    # -- max_tokens ---------------------------------------------------------
+
+    def test_max_tokens_env_applies_and_a_models_own_setting_wins(self):
+        os.environ["MITSS_MAX_TOKENS"] = "2048"
+        os.environ["MITSS_LLM_PREFLIGHT_TIMEOUT"] = "5"
+        SCRIPT["attempts"] = [self._whole_answer()]
+        with StreamServer() as url:
+            HttpProvider(url=url).generate("q")
+            HttpProvider(url=url, settings={"max_tokens": 32768}).generate("q")
+        probe, env_run, probe2, own_run = SEEN["bodies"]
+        self.assertEqual(env_run["max_tokens"], 2048)
+        self.assertEqual(own_run["max_tokens"], 32768)
+        # The preflight probe stays a one-token request either way.
+        self.assertEqual(probe["max_tokens"], 1)
+        self.assertEqual(probe2["max_tokens"], 1)
+
+    def test_bad_max_tokens_env_is_refused_at_construction(self):
+        for bad in ("0", "-5", "lots", "1.5", ""):
+            os.environ["MITSS_MAX_TOKENS"] = bad
+            with self.assertRaises(LLMConfigError, msg=bad):
+                HttpProvider(url="http://127.0.0.1:9/v1")
+
+    def test_truncation_at_the_cap_is_reported(self):
+        SCRIPT["attempts"] = [[(0, _delta(content="cut off mid")),
+                               (0, _delta(content="", finish="length")), (0, DONE)]]
+        with StreamServer() as url:
+            completion = HttpProvider(url=url).generate("q")
+        self.assertEqual(completion.text, "cut off mid")
+        self.assertEqual(completion.usage["finish_reason"], "length")
+
+    # -- model paths and the folder preflight -------------------------------
+
+    def test_missing_folder_is_refused_before_anything_is_sent(self):
+        with StreamServer() as url, self.assertRaises(LLMModelUnavailable) as caught:
+            HttpProvider(url=url, model="not-downloaded").generate("q")
+        self.assertIn("model folder not found", str(caught.exception))
+        self.assertEqual(SEEN["count"], 0)
+
+    def test_folder_without_a_readable_config_is_refused(self):
+        os.makedirs(os.path.join(self.models_dir, "no-config"))
+        os.makedirs(os.path.join(self.models_dir, "bad-config"))
+        with open(os.path.join(self.models_dir, "bad-config", "config.json"),
+                  "w", encoding="utf-8") as handle:
+            handle.write("{not json")
+        with StreamServer() as url, self.assertRaisesRegex(LLMModelUnavailable, "no config.json"):
+            HttpProvider(url=url, model="no-config").generate("q")
+            with self.assertRaisesRegex(LLMModelUnavailable, "not readable"):
+                HttpProvider(url=url, model="bad-config").generate("q")
+        self.assertEqual(SEEN["count"], 0)
+
+    def test_an_absolute_path_is_sent_as_given(self):
+        path = os.path.join(self.models_dir, "my-model")
+        SCRIPT["attempts"] = [self._whole_answer()]
+        with StreamServer() as url:
+            HttpProvider(url=url, model=path).generate("q")
+        self.assertEqual(SEEN["bodies"][0]["model"], path)
+
+    def test_only_local_endpoints_are_resolved(self):
+        self.assertTrue(is_local_url("http://127.0.0.1:8080/v1/chat/completions"))
+        self.assertTrue(is_local_url("http://localhost:8080/v1"))
+        self.assertTrue(is_local_url("http://[::1]:8080/v1"))
+        self.assertFalse(is_local_url("http://10.0.0.5:8080/v1/chat/completions"))
+        self.assertFalse(is_local_url("https://api.example.com/v1"))
+
+    def test_models_dir_comes_from_the_environment_and_defaults_to_the_home(self):
+        self.assertEqual(resolve_model_path("qwen3-14b"),
+                         os.path.join(self.models_dir, "qwen3-14b"))
+        os.environ.pop("MITSS_MODELS_DIR")
+        self.assertEqual(models_dir(),
+                         os.path.expanduser(os.path.join("~", "Desktop", "models")))
+        os.environ["MITSS_MODELS_DIR"] = self.models_dir
 
 
 class Registry(unittest.TestCase):

@@ -387,13 +387,16 @@ class Store:
             updated_at=meta.get("updated_at", meta.get("created_at", "")),
             # Registrations written before settings existed have no key.
             settings=dict(meta.get("settings") or {}),
+            # Nor do ones written before quarantine existed.
+            quarantine=str(meta.get("quarantine") or ""),
         )
 
     def update_model(self, model_id: str, owner: Optional[str] = None,
                      url: Optional[str] = None, fmt: Optional[str] = None,
                      model: Optional[str] = None, key_env: Optional[str] = None,
                      notes: Optional[str] = None,
-                     settings: Optional[Dict[str, Any]] = None) -> ModelEntry:
+                     settings: dict[str, Any] | None = None,
+                     quarantine: str | None = None) -> ModelEntry:
         """Connection details are editable; the name is not.
 
         Runs are labelled with the entry's name, so renaming it would detach
@@ -401,7 +404,8 @@ class Store:
         instead.
 
         `settings` replaces the whole settings block when given (an empty
-        dict clears it); None leaves it alone.
+        dict clears it); None leaves it alone. `quarantine` likewise: a
+        reason quarantines the model, "" lifts it, None leaves it alone.
         """
         entry = self.get_model(model_id)
         if owner is not None:
@@ -418,6 +422,8 @@ class Store:
             entry.notes = notes
         if settings is not None:
             entry.settings = dict(settings)
+        if quarantine is not None:
+            entry.quarantine = quarantine
         entry.updated_at = now()
         self._write_json(os.path.join(self.model_dir(model_id), "model.json"),
                          entry.summary())

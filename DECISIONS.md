@@ -804,3 +804,148 @@ against the code before anything changed; several did not survive that check.
 Gates: 260 backend tests, compileall clean, frontend build clean, and the
 suite also passes in a clean virtualenv built only from `requirements.txt`.
 Telemetry and the input hash verified live against qwen3.5-9b on port 8081.
+
+## 2026-09-22T17:50:28-05:00 — Streamed requests with an idle-gap timeout, standard library only
+
+A non-streamed request makes mlx_lm.server write nothing, not even headers,
+until the whole completion exists. A long generation therefore looked like a
+dead socket: the 1800 s client timeout fired mid-generation and the server
+logged a BrokenPipeError when it finally tried to answer. Prompt processing
+was not the problem (3922 tokens in ~4 s).
+
+- openai bodies now carry `stream: true` and `stream_options:
+  {"include_usage": true}`. The SSE deltas (content, reasoning,
+  finish_reason, usage, model) are accumulated into one chat-completion
+  document and parsed by the same code as before, so `Completion`,
+  `run.json`, `reasoning.txt` and the transcript keep their shape. A server
+  that ignores `stream` and answers with plain JSON still works.
+- `MITSS_LLM_TIMEOUT` and a registration's `timeout` now mean **idle
+  seconds**: the longest gap allowed between two received bytes (default
+  120). It is the socket timeout after connect. mlx_lm.server's `: keepalive`
+  lines during prompt processing reset it too. Connecting has its own 10 s
+  limit (`socket.create_connection` via `http.client`).
+- httpx was not added: `backend/mitss/` is stdlib-only by design. urllib was
+  replaced by `http.client` because urllib cannot set separate connect and
+  read timeouts. Two behaviour changes follow: redirects are no longer
+  followed, and `HTTP(S)_PROXY` variables are no longer honoured. Neither
+  applies to a model server on 127.0.0.1.
+- A stream that closes without `[DONE]` or a finish_reason is reported as a
+  dropped connection, not as a short answer.
+- Verified live against llama-3.1-8b on 8080: with a 3 s idle limit, an
+  800-token generation that took 31.8 s completed. The ~28 s model load
+  landed in the preflight, not in the run.
+
+## 2026-09-22T17:50:28-05:00 — max_tokens on every request: MITSS_MAX_TOKENS, default 1024
+
+Every generation request sends `max_tokens`: a registration's own setting,
+otherwise `MITSS_MAX_TOKENS`, otherwise 1024. A bad value (0, negative,
+non-integer) is refused at provider construction. The preflight probe stays
+at `max_tokens: 1`. A run's settings snapshot now includes `max_tokens`
+where it used to show nothing, because it is now actually sent. Two tests
+changed for that reason: `test_default_body_is_temperature_zero_and_the_default_token_cap`
+(was `..._and_nothing_else`) and `test_run_without_settings_still_serves_them_as_null`.
+
+1024 will cut off thinking models (qwen3, gpt-oss) that have no
+`max_tokens` of their own. Truncation is made visible (entry below) rather
+than hidden by a larger default.
+
+## 2026-09-22T17:50:28-05:00 — Truncation at the token cap is visible in batch output
+
+`run.json` already records `usage.finish_reason` (since cadfb23), and the
+transcript already shows `stopped: length`. Streaming keeps both. No field
+was added to `run.json`; its top-level keys are unchanged (checked on a
+live run). Each successful batch result now carries `finish_reason` and
+`truncated` (true when finish_reason is `length`), and the backend log line
+says `TRUNCATED at the token cap`. A cut-off answer must never be scored as
+a complete one.
+
+## 2026-09-22T17:50:28-05:00 — Local model names are sent as folder paths, checked first
+
+mlx_lm.server loads whatever path a request names. A bare folder name is
+resolved against the server's working directory and comes back HTTP 404
+(re-confirmed live today). For endpoints on this machine only (127.0.0.1,
+localhost, ::1), a model name that is not already absolute is sent as
+`$MITSS_MODELS_DIR/<name>`. `MITSS_MODELS_DIR` defaults to
+`~/Desktop/models`, expanded at runtime; no home directory is hardcoded.
+Remote endpoints are sent exactly what they are configured with. Before any
+request, the folder must exist and hold a `config.json` that parses;
+otherwise nothing is sent and the model is reported unavailable (409 for a
+single run, a skipped-with-reason result in a batch). The run label is
+unchanged (the registration's name).
+
+All twelve registrations already store absolute paths, so the resolution
+matters for bare names (for example an environment-configured model list).
+Caveat: a non-mlx server on localhost that takes bare names (Ollama, for
+instance) would now be sent a path. No such endpoint exists today.
+
+Tests talking to a 127.0.0.1 stub now point `MITSS_MODELS_DIR` at a
+throwaway folder (`tests/model_folders.py`). Five assertions on the
+request's `model` now expect the resolved path; the value sent really did
+change.
+
+## 2026-09-22T17:50:28-05:00 — A 404 is permanent for that model in that batch; one retry for connection errors and timeouts
+
+There was no retry code in MITSS before this. The "two 404s four seconds
+apart" were two separate requests, not a retry. mlx_lm.server 0.31.3 turns
+any exception raised while starting a generation, a failed model load
+included, into HTTP 404 (`server.py`, `handle_completion`). So a 404 is a
+fact about the model, not a passing fault.
+
+- Retry policy: a connection failure (refused, reset, stream closed early,
+  connect timeout) or an idle timeout gets exactly one retry after a 1 s
+  pause. An HTTP error status is never retried. The preflight retries a
+  connection failure once; a preflight timeout is still "stuck" (503), with
+  no retry.
+- A 404 or a failed folder check marks the model unavailable for the rest
+  of the batch, keyed by (url, model). A second registration of the same
+  endpoint and model is skipped with the first one's reason, and the sweep
+  continues. Results carry `unavailable: true` and `reason`; skipped ones
+  also carry `skipped: true`. The response adds a `skipped` count. `failed`
+  still counts every result that did not record, skipped ones included, so
+  the interface's existing "N failed: ..." flash lists them.
+
+## 2026-09-22T17:50:28-05:00 — mistral-nemo-12b quarantined: no supported way to pass fix_mistral_regex
+
+transformers warns that the tokenizer in `~/Desktop/models/mistral-nemo-12b`
+loads with an incorrect regex and suggests `fix_mistral_regex=True`. The
+server loads the tokenizer, not MITSS. What was checked in mlx_lm 0.31.3:
+`mlx_lm.server --help` has no tokenizer-config option, and
+`ModelProvider.__init__` builds the tokenizer config from only
+`--trust-remote-code` and `--chat-template` (`server.py` 320-324). There is no
+supported way to pass the flag, so nothing under `~/Desktop/models` was
+edited.
+
+- Registrations gain a `quarantine` field: a reason string, where empty
+  means not quarantined. A quarantined model is skipped by every batch
+  (`skipped`, `quarantined: true`, `reason`), and a single run against it
+  is refused with 409. `PATCH /api/models/{id}` accepts
+  `quarantine`: a reason sets it, `""` lifts it, and omitting it leaves it
+  alone (max 500 characters). Old `model.json` files without the field
+  load as not quarantined. The interface does not show the field yet
+  (backend-only task).
+- The field was set on `backend/data/models/mistral-nemo-12b/model.json` by
+  hand, under Jake's explicit, scoped exception, rather than through the
+  API: `update_model` would also have rewritten `updated_at` and appended
+  an event, which the exception did not cover.
+
+## 2026-09-22T17:50:28-05:00 — Stored registration timeouts converted to idle seconds
+
+Under the new meaning, the 1800 on qwen3.5-9b ("wait 30 minutes between
+tokens") would amount to no timeout at all. It was reset to 120 by hand, with
+the same scoped exception. It is the only registration that stored a
+timeout; the other eleven have none and use `MITSS_LLM_TIMEOUT`, so nothing
+was added to them. Values were not reinterpreted in code (a proposal to cap
+"large" stored values automatically was rejected): a stored value means
+what it says.
+
+## 2026-09-22T17:50:28-05:00 — Gates for this branch
+
+unittest (284, 24 new), `compileall`, and pytest (via `uvx`, with fastapi,
+python-multipart and httpx2) all pass. So does the Python 3.9
+no-dependencies suite (71 API tests skip, as in CI). ruff was run on the
+changed files only, as agreed: 282 findings, down from 285 at the branch
+point, and none on added lines except one I001. That I001 is the existing
+`redact`/`parse_timeout` order in `tests/test_llm.py`'s import block,
+deliberately left alone. `except (socket.timeout, TimeoutError)` keeps both
+names with a `noqa: UP041`, because the alias only exists from Python 3.10
+and CI runs the core on 3.9.

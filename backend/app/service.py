@@ -12,8 +12,8 @@ import time
 from typing import Any, Dict, List, Optional
 
 from mitss.llm import (
-    HttpProvider, LLMConfigError, LLMError, LLMStuck, LLMTimeout,
-    ProviderUnavailable, get_provider, normalize_settings,
+    HttpProvider, LLMConfigError, LLMError, LLMModelUnavailable, LLMServerError,
+    LLMStuck, LLMTimeout, ProviderUnavailable, get_provider, normalize_settings,
 )
 from pipeline import (
     NotFound, Store, build_digest, build_matrix, compare_runs, diff_text,
@@ -29,10 +29,15 @@ BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 class ServiceError(Exception):
     """Anything the interface should report as a clean 4xx or 5xx."""
 
-    def __init__(self, message: str, status: int = 400):
+    def __init__(self, message: str, status: int = 400,
+                 unavailable: bool = False):
         super().__init__(message)
         self.message = message
         self.status = status
+        # The model itself cannot be served (missing folder, or the server
+        # answered 404). A batch stops asking for it; asking again would
+        # get the same answer.
+        self.unavailable = unavailable
 
 
 def store(root: Optional[str] = None) -> Store:
@@ -245,15 +250,34 @@ def get_model(model_id: str, root: Optional[str] = None) -> Dict[str, Any]:
     return _model_payload(_found(store(root).get_model, model_id))
 
 
+MAX_QUARANTINE_REASON = 500
+
+
+def _clean_quarantine(reason: str | None) -> str | None:
+    """A quarantine reason, trimmed; "" lifts it; None means untouched."""
+    if reason is None:
+        return None
+    if not isinstance(reason, str):
+        raise ServiceError("quarantine must be a string: the reason, or \"\" to lift it")
+    reason = reason.strip()
+    if len(reason) > MAX_QUARANTINE_REASON:
+        raise ServiceError(
+            f"quarantine reason is too long ({len(reason)} characters, "
+            f"limit {MAX_QUARANTINE_REASON})")
+    return reason
+
+
 def update_model(model_id: str, owner: Optional[str] = None,
                  url: Optional[str] = None, fmt: Optional[str] = None,
                  model: Optional[str] = None, key_env: Optional[str] = None,
                  notes: Optional[str] = None,
                  settings: Optional[Dict[str, Any]] = None,
+                 quarantine: str | None = None,
                  root: Optional[str] = None) -> Dict[str, Any]:
     _validate_model_fields(url, fmt, key_env)
     entry = _found(store(root).update_model, model_id, owner, url, fmt,
-                   model, key_env, notes, _clean_settings(settings))
+                   model, key_env, notes, _clean_settings(settings),
+                   _clean_quarantine(quarantine))
     return _model_payload(entry)
 
 
@@ -335,6 +359,9 @@ def _fetch_and_record(shelf: Store, provider, label: str, ask_for: Optional[str]
         raise ServiceError(str(exc), 409) from None
     except LLMConfigError as exc:
         raise ServiceError(f"model configuration error: {exc}", 500) from None
+    except LLMModelUnavailable as exc:
+        # Found by the folder check before anything was sent.
+        raise ServiceError(str(exc), 409, unavailable=True) from None
     except LLMStuck as exc:
         # 503: the server is up but not serving. Found by the preflight, so
         # this arrives in seconds instead of after the full timeout.
@@ -343,6 +370,11 @@ def _fetch_and_record(shelf: Store, provider, label: str, ask_for: Optional[str]
         # 504, not 502: the server was reached but never answered. The UI
         # tells these apart because "wait longer" and "restart it" differ.
         raise ServiceError(str(exc), 504) from None
+    except LLMServerError as exc:
+        # mlx_lm.server answers 404 for any model it fails to load, so a 404
+        # is a fact about the model, not a passing fault.
+        raise ServiceError(str(exc), 502,
+                           unavailable=exc.status_code == 404) from None
     except LLMError as exc:
         raise ServiceError(str(exc), 502) from None
     seconds = time.monotonic() - started
@@ -414,6 +446,11 @@ def generate_run(prompt_id: str, version: Optional[int] = None, model: str = "",
 
     if model_id:
         entry = _found(shelf.get_model, model_id)
+        if entry.quarantine:
+            raise ServiceError(
+                f"'{entry.name}' is quarantined: {entry.quarantine} - lift it "
+                f"with PATCH /api/models/{entry.id} and quarantine \"\" once fixed", 409,
+            )
         if not entry.callable:
             raise ServiceError(
                 f"'{entry.name}' is registered paste-only (no url) - copy the "
@@ -442,6 +479,13 @@ def batch_generate(prompt_id: str, version: Optional[int] = None,
     With no `model_ids`, every callable registered model is asked. One model
     failing does not stop the rest; each result says what happened, and every
     successful call is recorded as an ordinary run.
+
+    A quarantined model is skipped with its reason. A model the server cannot
+    serve (missing folder, HTTP 404) is marked unavailable for the rest of
+    the batch, so a second registration of the same endpoint and model is
+    skipped rather than asked again. A successful result carries the
+    server's finish_reason and `truncated: true` when it stopped at the token
+    cap, so a cut-off answer is never read as a complete one.
     """
     shelf = store(root)
     if model_ids:
@@ -455,32 +499,63 @@ def batch_generate(prompt_id: str, version: Optional[int] = None,
         )
 
     results = []
+    unavailable: dict[tuple, str] = {}
     total = len(entries)
     for position, entry in enumerate(entries, start=1):
         # A batch is one HTTP request that can run for many minutes, so the
         # backend log is the only place the operator can watch it progress.
-        print(f"[batch {position}/{total}] {entry.name}: asking...", flush=True)
+        tag = f"[batch {position}/{total}] {entry.name}"
+        if entry.quarantine:
+            results.append({"model_id": entry.id, "model": entry.name,
+                            "ok": False, "skipped": True, "quarantined": True,
+                            "reason": entry.quarantine,
+                            "error": f"quarantined: {entry.quarantine}",
+                            "elapsed_ms": 0})
+            print(f"{tag}: SKIPPED (quarantined) - {entry.quarantine}", flush=True)
+            continue
+        served = (entry.url, entry.model or entry.name)
+        if served in unavailable:
+            reason = unavailable[served]
+            results.append({"model_id": entry.id, "model": entry.name,
+                            "ok": False, "skipped": True, "unavailable": True,
+                            "reason": reason,
+                            "error": f"unavailable earlier in this batch: {reason}",
+                            "elapsed_ms": 0})
+            print(f"{tag}: SKIPPED (unavailable) - {reason}", flush=True)
+            continue
+        print(f"{tag}: asking...", flush=True)
         started = time.monotonic()
         try:
             run = generate_run(prompt_id, version, input_id=input_id,
                                model_id=entry.id, root=root)
             elapsed = int((time.monotonic() - started) * 1000)
+            finish = (run.get("usage") or {}).get("finish_reason")
             results.append({"model_id": entry.id, "model": entry.name,
                             "ok": True, "run_id": run["id"],
-                            "elapsed_ms": elapsed, "usage": run.get("usage")})
-            print(f"[batch {position}/{total}] {entry.name}: recorded in "
-                  f"{elapsed / 1000:.1f}s", flush=True)
+                            "elapsed_ms": elapsed, "usage": run.get("usage"),
+                            "finish_reason": finish,
+                            "truncated": finish == "length"})
+            note = " - TRUNCATED at the token cap (finish_reason: length)" \
+                if finish == "length" else ""
+            print(f"{tag}: recorded in {elapsed / 1000:.1f}s{note}", flush=True)
         except ServiceError as exc:
             elapsed = int((time.monotonic() - started) * 1000)
-            results.append({"model_id": entry.id, "model": entry.name,
-                            "ok": False, "error": exc.message,
-                            "elapsed_ms": elapsed})
-            print(f"[batch {position}/{total}] {entry.name}: FAILED after "
-                  f"{elapsed / 1000:.1f}s - {exc.message}", flush=True)
+            item = {"model_id": entry.id, "model": entry.name,
+                    "ok": False, "error": exc.message, "elapsed_ms": elapsed}
+            if exc.unavailable:
+                unavailable[served] = exc.message
+                item["unavailable"] = True
+                item["reason"] = exc.message
+            results.append(item)
+            print(f"{tag}: FAILED after {elapsed / 1000:.1f}s - {exc.message}",
+                  flush=True)
     return {
         "results": results,
         "recorded": sum(1 for r in results if r["ok"]),
+        # Everything that did not record, skipped ones included, so a model
+        # missing from the comparison is always listed with its reason.
         "failed": sum(1 for r in results if not r["ok"]),
+        "skipped": sum(1 for r in results if r.get("skipped")),
     }
 
 

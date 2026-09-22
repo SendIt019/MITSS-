@@ -21,10 +21,32 @@ Environment variables:
     MITSS_LLM_MODEL      default model name sent in the request body
     MITSS_LLM_MODELS     comma-separated list offered in the interface
     MITSS_LLM_API_KEY    optional; sent as "Authorization: Bearer <key>"
-    MITSS_LLM_TIMEOUT    seconds, default 120; must be a positive finite number
+    MITSS_LLM_TIMEOUT    idle seconds, default 120; must be a positive finite
+                         number. This is the longest gap allowed between two
+                         chunks of a streamed reply, not the total time a
+                         generation may take - a model still producing tokens
+                         is never cut off by it.
     MITSS_LLM_PREFLIGHT_TIMEOUT
                          seconds the one-token probe sent before each run may
                          take, default 90; 0 disables the probe
+    MITSS_MAX_TOKENS     max_tokens sent with every generation request,
+                         default 1024; a model's own max_tokens setting wins
+    MITSS_MODELS_DIR     folder holding local model folders, default
+                         ~/Desktop/models. For an endpoint on this machine
+                         (127.0.0.1 / localhost) a bare model name is sent as
+                         the absolute path of its folder here, and the folder
+                         is checked before any request is made.
+
+Transport: openai bodies are streamed (`stream: true`) and the deltas are
+accumulated into the same Completion a non-streamed reply produces. A
+non-streamed request makes mlx_lm.server write nothing - not even headers -
+until the whole completion exists, so a long generation looked like a dead
+socket and was cut off mid-way. Connecting has its own 10-second limit.
+
+Retries: a connection failure or an idle timeout is retried once. Anything
+the server actually answered (an HTTP error status) is not retried - a 404
+from mlx_lm.server means the model could not be loaded and asking again
+four seconds later cannot change that.
 
 Generation settings: a provider can be given per-model overrides for the
 sampling fields below. Whatever was actually sent comes back with the
@@ -34,13 +56,13 @@ meaningless unless it shows whether one of them had thinking on.
 
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import os
 import socket
 import time
-import urllib.error
-import urllib.request
+import urllib.parse
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -48,6 +70,10 @@ from typing import Any, Dict, List, Optional
 DEFAULT_TIMEOUT = 120.0
 DEFAULT_PREFLIGHT_TIMEOUT = 90.0
 DEFAULT_TEMPERATURE = 0
+DEFAULT_MAX_TOKENS = 1024
+CONNECT_TIMEOUT = 10.0
+DEFAULT_MODELS_DIR = os.path.join("~", "Desktop", "models")
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
 class LLMError(RuntimeError):
@@ -84,6 +110,75 @@ class LLMServerError(LLMError):
     def __init__(self, message: str, status_code: int):
         super().__init__(message)
         self.status_code = status_code
+
+
+class LLMModelUnavailable(LLMError):
+    """A local model folder is missing or unreadable, so nothing was sent.
+
+    Found by the file preflight before any request; asking the server would
+    only come back as a 404 after it tried and failed to load the model.
+    """
+
+
+def parse_max_tokens(value: Any) -> int:
+    """A positive integer - MITSS_MAX_TOKENS is refused otherwise."""
+    try:
+        tokens = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise LLMConfigError(
+            f"MITSS_MAX_TOKENS must be a positive integer, got {value!r}"
+        ) from None
+    if tokens < 1:
+        raise LLMConfigError(
+            f"MITSS_MAX_TOKENS must be a positive integer, got {value!r}"
+        )
+    return tokens
+
+
+def models_dir() -> str:
+    """MITSS_MODELS_DIR, or ~/Desktop/models, expanded at call time."""
+    raw = os.environ.get("MITSS_MODELS_DIR", "").strip() or DEFAULT_MODELS_DIR
+    return os.path.abspath(os.path.expanduser(raw))
+
+
+def is_local_url(url: str) -> bool:
+    """True for an endpoint on this machine, whose model folders we can see."""
+    try:
+        host = urllib.parse.urlsplit(url).hostname
+    except ValueError:
+        return False
+    return (host or "").lower() in LOCAL_HOSTS
+
+
+def resolve_model_path(name: str) -> str:
+    """The folder a local model name refers to.
+
+    mlx_lm.server loads whatever path the request names, but a bare folder
+    name is resolved against its own working directory and comes back 404.
+    An absolute path (or ~) is taken as given; anything else is a folder
+    under MITSS_MODELS_DIR.
+    """
+    expanded = os.path.expanduser(name)
+    if os.path.isabs(expanded):
+        return expanded
+    return os.path.join(models_dir(), name)
+
+
+def check_model_folder(path: str) -> None:
+    """Refuse a model folder the server could not load: missing, or no
+    readable config.json."""
+    if not os.path.isdir(path):
+        raise LLMModelUnavailable(f"model folder not found: {path}")
+    config = os.path.join(path, "config.json")
+    if not os.path.isfile(config):
+        raise LLMModelUnavailable(f"model folder has no config.json: {path}")
+    try:
+        with open(config, encoding="utf-8") as handle:
+            json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise LLMModelUnavailable(
+            f"config.json in {path} is not readable: {exc}"
+        ) from None
 
 
 # --------------------------------------------------------------------------
@@ -319,6 +414,8 @@ class HttpProvider(LLMProvider):
     """
 
     name = "http"
+    # Pause before the one retry a connection failure or idle timeout gets.
+    retry_delay = 1.0
 
     def __init__(self, url: Optional[str] = None, fmt: Optional[str] = None,
                  model: Optional[str] = None, timeout: Optional[float] = None,
@@ -354,6 +451,13 @@ class HttpProvider(LLMProvider):
             else os.environ.get("MITSS_LLM_PREFLIGHT_TIMEOUT",
                                 str(DEFAULT_PREFLIGHT_TIMEOUT))
         )
+        # Every generation request carries a cap. The model's own setting
+        # wins over the environment, so a thinking model registered with
+        # max_tokens 32768 is not cut to the default.
+        self.max_tokens = parse_max_tokens(
+            os.environ.get("MITSS_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))
+        )
+        self.connect_timeout = CONNECT_TIMEOUT
 
     @property
     def available(self) -> bool:
@@ -387,6 +491,7 @@ class HttpProvider(LLMProvider):
             "models": self.models,
             "timeout": self.timeout,
             "preflight_timeout": self.preflight_timeout,
+            "max_tokens": self.max_tokens,
             "settings": self.settings,
             # Presence only. The value is never exposed.
             "api_key_set": bool(os.environ.get(self.key_env)),
@@ -395,10 +500,11 @@ class HttpProvider(LLMProvider):
     def request_settings(self) -> Dict[str, Any]:
         """The generation fields this provider will put in an openai body.
 
-        The default is unchanged from before settings existed: temperature 0
-        and nothing else, so the server's own caps apply.
+        The default is temperature 0 and MITSS_MAX_TOKENS (1024); a model's
+        own settings override either.
         """
-        sent: Dict[str, Any] = {"temperature": DEFAULT_TEMPERATURE}
+        sent: dict[str, Any] = {"temperature": DEFAULT_TEMPERATURE,
+                                "max_tokens": self.max_tokens}
         for name, value in self.settings.items():
             if name != "timeout":
                 sent[name] = value
@@ -417,6 +523,12 @@ class HttpProvider(LLMProvider):
         # label. Labelling a run with a model the endpoint never saw would
         # make every later comparison a lie.
         chosen = model or self.model
+        if is_local_url(self.url):
+            # A local server loads models from folders we can see, so ask for
+            # the folder by absolute path and check it before sending
+            # anything. Remote endpoints are left exactly as configured.
+            chosen = resolve_model_path(chosen)
+            check_model_folder(chosen)
 
         if self.format == "openai":
             sent = self.request_settings()
@@ -434,11 +546,28 @@ class HttpProvider(LLMProvider):
         used = dict(sent)
         used["timeout"] = self.timeout
 
+        if self.format == "openai":
+            # Streamed, so the idle timeout measures the gap between chunks
+            # rather than the whole generation. Usage arrives as a last chunk
+            # only when asked for.
+            body["stream"] = True
+            body["stream_options"] = {"include_usage": True}
+
         if self.format == "openai" and self.preflight_timeout > 0:
             self._preflight(chosen)
 
-        started = time.monotonic()
-        payload = self._post(body, self.timeout)
+        started = time.monotonic()  # the attempt that answered, below
+        for attempt in (1, 2):
+            started = time.monotonic()
+            try:
+                payload = self._post(body, self.timeout)
+                break
+            except (LLMUnreachable, LLMTimeout):
+                # Once only. A server that answered with an error status is
+                # not retried: that answer will not change.
+                if attempt == 2:
+                    raise
+                time.sleep(self.retry_delay)
         request_seconds = time.monotonic() - started
         text, reasoning = self._parse(payload)
         return Completion(text, used, reasoning, _usage(payload), request_seconds)
@@ -458,7 +587,12 @@ class HttpProvider(LLMProvider):
             "temperature": 0,
         }
         try:
-            self._post(probe, self.preflight_timeout)
+            try:
+                self._post(probe, self.preflight_timeout)
+            except LLMUnreachable:
+                # One retry for a connection failure, as for the run itself.
+                time.sleep(self.retry_delay)
+                self._post(probe, self.preflight_timeout)
         except LLMTimeout:
             raise LLMStuck(
                 f"model server is stuck, restart mlx_lm.server: {self.url} "
@@ -467,54 +601,178 @@ class HttpProvider(LLMProvider):
             ) from None
 
     def _post(self, body: Dict[str, Any], timeout: float) -> str:
-        request = urllib.request.Request(
-            self.url,
-            data=json.dumps(body).encode("utf-8"),
-            headers=self._headers(),
-            method="POST",
-        )
+        """POST the body and return the reply as one JSON document.
+
+        `timeout` is an idle limit: the longest the socket may sit without
+        receiving a byte. Connecting is bounded separately by
+        CONNECT_TIMEOUT. A streamed (text/event-stream) reply is accumulated
+        into the same shape a non-streamed one has, so parsing is shared.
+        """
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                return response.read().decode("utf-8")
-        except urllib.error.HTTPError as exc:
-            # Deliberately does not echo the request, which carries the key.
-            # The server's own error text usually says why - but a server can
-            # echo the Authorization header it was sent, so redact first.
-            said = redact(_server_said(exc), os.environ.get(self.key_env))
-            raise LLMServerError(
-                f"model server returned HTTP {exc.code}{said}", exc.code,
-            ) from None
-        except urllib.error.URLError as exc:
-            reason = exc.reason
-            if isinstance(reason, (socket.timeout, TimeoutError)):
-                raise LLMTimeout(self._timeout_message(timeout)) from None
-            if isinstance(reason, ConnectionRefusedError):
+            parts = urllib.parse.urlsplit(self.url)
+            # Given explicitly: http.client misreads a bare IPv6 host with no
+            # port ("::1") as host "::" port 1.
+            port = parts.port or (443 if parts.scheme == "https" else 80)
+        except ValueError as exc:
+            raise LLMUnreachable(f"model server url is not usable: {exc}") from None
+        connection_class = (http.client.HTTPSConnection if parts.scheme == "https"
+                            else http.client.HTTPConnection)
+        connection = connection_class(parts.hostname or "", port,
+                                      timeout=self.connect_timeout)
+        path = parts.path or "/"
+        if parts.query:
+            path += "?" + parts.query
+        try:
+            try:
+                # socket.create_connection under the connect timeout.
+                connection.connect()
+            # socket.timeout is only an alias of TimeoutError from 3.10; CI
+            # also runs the core on 3.9.
+            except (socket.timeout, TimeoutError):  # noqa: UP041
+                raise LLMUnreachable(
+                    f"the model server at {self.url} did not accept a "
+                    f"connection within {self.connect_timeout:g}s"
+                ) from None
+            except ConnectionRefusedError:
                 raise LLMUnreachable(
                     f"could not connect to the model server at {self.url} "
                     "(connection refused) - is mlx_lm.server running?"
                 ) from None
-            raise LLMUnreachable(
-                f"could not reach the model server at {self.url}: {reason}"
-            ) from None
+            except OSError as exc:
+                raise LLMUnreachable(
+                    f"could not reach the model server at {self.url}: {exc}"
+                ) from None
+            # From here on every read waits at most `timeout` for its next
+            # byte - an idle gap, not a total.
+            connection.sock.settimeout(timeout)
+            connection.request("POST", path, body=json.dumps(body).encode("utf-8"),
+                               headers=self._headers())
+            response = connection.getresponse()
+            if response.status >= 400:
+                # Deliberately does not echo the request, which carries the
+                # key. The server's own error text usually says why - but a
+                # server can echo the Authorization header it was sent, so
+                # redact first.
+                said = redact(_server_said(response.read()),
+                              os.environ.get(self.key_env))
+                raise LLMServerError(
+                    f"model server returned HTTP {response.status}{said}",
+                    response.status,
+                )
+            content_type = (response.getheader("Content-Type") or "").lower()
+            if content_type.startswith("text/event-stream"):
+                return self._read_stream(response)
+            return response.read().decode("utf-8")
         except (socket.timeout, TimeoutError):
-            # A timeout while reading the body surfaces here, not as URLError.
             raise LLMTimeout(self._timeout_message(timeout)) from None
-        except ConnectionResetError:
+        except (ConnectionResetError, BrokenPipeError, http.client.IncompleteRead):
             raise LLMUnreachable(
                 f"the model server at {self.url} dropped the connection "
                 "mid-request - it may have crashed; check its log"
+            ) from None
+        except http.client.HTTPException as exc:
+            raise LLMUnreachable(
+                f"the model server at {self.url} sent an unreadable reply: "
+                f"{type(exc).__name__}"
             ) from None
         except OSError as exc:
             raise LLMUnreachable(
                 f"could not reach the model server at {self.url}: {exc}"
             ) from None
+        finally:
+            connection.close()
+
+    def _read_stream(self, response: http.client.HTTPResponse) -> str:
+        """Accumulate server-sent events into one chat-completion document.
+
+        Content and reasoning deltas are joined in order; finish_reason,
+        usage and the model name are taken from whichever chunk carries
+        them. `: keepalive` comment lines (mlx_lm.server sends them during
+        prompt processing) are skipped - but they still reset the idle timer.
+        """
+        content: list[str] = []
+        reasoning: list[str] = []
+        saw_content = False
+        finish_reason: str | None = None
+        usage: dict[str, Any] | None = None
+        served: str | None = None
+        done = False
+        while True:
+            line = response.readline()
+            if not line:
+                break
+            text = line.decode("utf-8", "replace").strip()
+            if not text.startswith("data:"):
+                continue  # blank separators, comments, event names
+            data = text[len("data:"):].strip()
+            if data == "[DONE]":
+                done = True
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                raise LLMError("the model server sent an unreadable stream chunk") from None
+            if not isinstance(chunk, dict):
+                continue
+            if "error" in chunk:
+                problem = chunk["error"]
+                if isinstance(problem, dict):
+                    problem = problem.get("message", "")
+                said = redact(" ".join(str(problem).split())[:200],
+                              os.environ.get(self.key_env))
+                raise LLMError(f"the model server reported an error mid-stream: {said}")
+            if isinstance(chunk.get("model"), str) and chunk["model"]:
+                served = chunk["model"]
+            if isinstance(chunk.get("usage"), dict):
+                usage = chunk["usage"]
+            choices = chunk.get("choices")
+            if not (isinstance(choices, list) and choices
+                    and isinstance(choices[0], dict)):
+                continue
+            first = choices[0]
+            delta = first.get("delta")
+            if isinstance(delta, dict):
+                piece = delta.get("content")
+                if isinstance(piece, str):
+                    saw_content = True
+                    content.append(piece)
+                thought = delta.get("reasoning")
+                if not isinstance(thought, str):
+                    thought = delta.get("reasoning_content")
+                if isinstance(thought, str):
+                    reasoning.append(thought)
+            if isinstance(first.get("finish_reason"), str) and first["finish_reason"]:
+                finish_reason = first["finish_reason"]
+
+        if not done and finish_reason is None:
+            # The socket closed before the server said it was finished.
+            raise LLMUnreachable(
+                f"the model server at {self.url} closed the stream before the "
+                "completion finished - it may have crashed; check its log"
+            )
+
+        message: dict[str, Any] = {"role": "assistant"}
+        if saw_content:
+            message["content"] = "".join(content)
+        if reasoning:
+            message["reasoning"] = "".join(reasoning)
+        choice: dict[str, Any] = {"index": 0, "message": message}
+        if finish_reason:
+            choice["finish_reason"] = finish_reason
+        document: dict[str, Any] = {"choices": [choice]}
+        if usage is not None:
+            document["usage"] = usage
+        if served:
+            document["model"] = served
+        return json.dumps(document)
 
     def _timeout_message(self, timeout: float) -> str:
         return (
             f"the model server at {self.url} did not answer within "
-            f"{timeout:g}s - it may still be generating (raise the "
-            "model's timeout setting or MITSS_LLM_TIMEOUT), or mlx_lm.server "
-            "may be stuck: if the GPU is idle, restart it"
+            f"{timeout:g}s of its last output (idle timeout; a model that "
+            "keeps streaming tokens is never cut off) - mlx_lm.server may be "
+            "stuck: if the GPU is idle, restart it; if it is busy, raise the "
+            "model's timeout setting or MITSS_LLM_TIMEOUT"
         )
 
     def _headers(self) -> Dict[str, str]:
@@ -609,18 +867,14 @@ def _usage(payload: str) -> Optional[Dict[str, Any]]:
     return out or None
 
 
-def _server_said(exc: urllib.error.HTTPError, limit: int = 200) -> str:
+def _server_said(body: bytes, limit: int = 200) -> str:
     """A short quote of the server's error body, if it sent one.
 
-    Response bodies come from the server, never from our request, so they
-    cannot carry the key. Trimmed so a stack trace does not flood the UI.
+    Response bodies come from the server, never from our request - but the
+    caller still redacts, because a server can echo the header it received.
+    Trimmed so a stack trace does not flood the UI.
     """
-    try:
-        raw = exc.read().decode("utf-8", "replace").strip()
-    except Exception:  # noqa: BLE001 - any failure to read just means no quote
-        return ""
-    finally:
-        exc.close()
+    raw = (body or b"").decode("utf-8", "replace").strip()
     if not raw:
         return ""
     try:

@@ -19,6 +19,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from model_folders import use_fake_models_dir
+
+from mitss.llm import HttpProvider
 from pipeline import NotFound, Store, build_digest, digest_text
 
 # What the stub server replies with, and what it saw, set per test.
@@ -32,6 +35,7 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         RECEIVED["body"] = json.loads(self.rfile.read(length).decode("utf-8"))
         RECEIVED["auth"] = self.headers.get("Authorization")
+        RECEIVED["count"] = RECEIVED.get("count", 0) + 1
         if REPLY.get("delay"):
             time.sleep(REPLY["delay"])
         self.send_response(REPLY["status"])
@@ -243,6 +247,12 @@ class TeamApi(unittest.TestCase):
         REPLY["delay"] = 0
         REPLY["body"] = json.dumps({"choices": [{"message": {"content": "stub reply"}}]})
         self.client = TestClient(app)
+        self.models_dir = use_fake_models_dir(self)
+        RECEIVED.clear()
+        # Retries still happen; they just do not pause in tests.
+        delay = HttpProvider.retry_delay
+        HttpProvider.retry_delay = 0
+        self.addCleanup(setattr, HttpProvider, "retry_delay", delay)
 
     def tearDown(self):
         os.environ.pop("MITSS_ROOT", None)
@@ -301,8 +311,10 @@ class TeamApi(unittest.TestCase):
             }).json()
         self.assertEqual(run["output"], "stub reply")
         self.assertEqual(run["model"], "team-7b")
-        # The endpoint was asked for the registered body-name, with its key.
-        self.assertEqual(RECEIVED["body"]["model"], "team-7b-q4")
+        # The endpoint was asked for the registered body-name, with its key -
+        # as a folder path, because the endpoint is on this machine.
+        self.assertEqual(RECEIVED["body"]["model"],
+                         os.path.join(self.models_dir, "team-7b-q4"))
         self.assertEqual(RECEIVED["auth"], "Bearer secret-value-9")
 
     # -- per-model settings ----------------------------------------------
@@ -370,8 +382,10 @@ class TeamApi(unittest.TestCase):
             run = self.client.post("/api/generate", json={
                 "prompt_id": prompt["id"], "model_id": "team-7b",
             }).json()
-        # Defaults are still recorded - temperature 0 is a fact, not an absence.
-        self.assertEqual(run["settings"], {"temperature": 0, "timeout": 120.0})
+        # Defaults are still recorded - temperature 0 and the default token
+        # cap are facts, not absences.
+        self.assertEqual(run["settings"], {"temperature": 0, "max_tokens": 1024,
+                                           "timeout": 120.0})
         pasted = self.client.post("/api/runs", json={
             "prompt_id": prompt["id"], "model": "hand", "output": "o",
         }).json()
@@ -578,6 +592,123 @@ class TeamApi(unittest.TestCase):
 
         runs = self.client.get(f"/api/runs?prompt_id={prompt['id']}").json()["runs"]
         self.assertEqual([r["model"] for r in runs], ["works"])
+
+    # -- quarantine, unavailable models, truncation ------------------------
+
+    def test_quarantine_round_trips_through_patch(self):
+        self._register(url="http://127.0.0.1:9/v1")
+        self.assertEqual(self.client.get("/api/models/team-7b").json()["quarantine"], "")
+        reason = "tokenizer loads with an incorrect regex (fix_mistral_regex)"
+        patched = self.client.patch("/api/models/team-7b",
+                                    json={"quarantine": f"  {reason}  "}).json()
+        self.assertEqual(patched["quarantine"], reason)
+        on_disk = os.path.join(self.tmp.name, "data", "models", "team-7b", "model.json")
+        with open(on_disk, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["quarantine"], reason)
+        # Omitting it leaves it alone; "" lifts it.
+        self.client.patch("/api/models/team-7b", json={"notes": "n"})
+        self.assertEqual(self.client.get("/api/models/team-7b").json()["quarantine"], reason)
+        lifted = self.client.patch("/api/models/team-7b", json={"quarantine": ""}).json()
+        self.assertEqual(lifted["quarantine"], "")
+        too_long = self.client.patch("/api/models/team-7b", json={"quarantine": "x" * 501})
+        self.assertEqual(too_long.status_code, 400)
+
+    def test_a_registration_without_the_field_loads_unquarantined(self):
+        self._register(url="http://127.0.0.1:9/v1")
+        on_disk = os.path.join(self.tmp.name, "data", "models", "team-7b", "model.json")
+        with open(on_disk, encoding="utf-8") as handle:
+            meta = json.load(handle)
+        del meta["quarantine"]
+        with open(on_disk, "w", encoding="utf-8") as handle:
+            json.dump(meta, handle)
+        self.assertEqual(self.client.get("/api/models/team-7b").json()["quarantine"], "")
+
+    def test_quarantined_model_is_skipped_by_batch_and_refused_alone(self):
+        prompt = self._prompt()
+        reason = "tokenizer loads with an incorrect regex"
+        with StubServer() as url:
+            self._register(name="works", url=url)
+            self._register(name="team-7b", url=url)
+            self.client.patch("/api/models/team-7b", json={"quarantine": reason})
+            body = self.client.post("/api/batch", json={"prompt_id": prompt["id"]}).json()
+            alone = self.client.post("/api/generate", json={
+                "prompt_id": prompt["id"], "model_id": "team-7b"})
+        by_model = {r["model"]: r for r in body["results"]}
+        self.assertTrue(by_model["works"]["ok"])
+        skipped = by_model["team-7b"]
+        self.assertFalse(skipped["ok"])
+        self.assertTrue(skipped["skipped"])
+        self.assertTrue(skipped["quarantined"])
+        self.assertEqual(skipped["reason"], reason)
+        self.assertIn(reason, skipped["error"])
+        self.assertEqual((body["recorded"], body["failed"], body["skipped"]), (1, 1, 1))
+        self.assertEqual(RECEIVED["count"], 1)   # only "works" was asked
+        self.assertEqual(alone.status_code, 409)
+        self.assertIn("quarantined", alone.json()["detail"])
+
+    def test_404_marks_a_model_unavailable_for_the_rest_of_the_batch(self):
+        prompt = self._prompt()
+        REPLY["status"] = 404
+        REPLY["body"] = json.dumps({"error": "No such file or directory"})
+        with StubServer() as url:
+            self._register(name="team-7b", url=url)
+            # A second registration of the same endpoint and model.
+            self._register(name="team-7b-again", url=url, model="team-7b")
+            # A model whose folder is missing: refused before any request.
+            self._register(name="ghost", url=url)
+            body = self.client.post("/api/batch", json={"prompt_id": prompt["id"]}).json()
+        by_model = {r["model"]: r for r in body["results"]}
+        first = by_model["team-7b"]
+        self.assertTrue(first["unavailable"])
+        self.assertIn("HTTP 404", first["reason"])
+        self.assertNotIn("skipped", first)
+        again = by_model["team-7b-again"]
+        self.assertTrue(again["skipped"])
+        self.assertTrue(again["unavailable"])
+        self.assertEqual(again["reason"], first["reason"])
+        ghost = by_model["ghost"]
+        self.assertTrue(ghost["unavailable"])
+        self.assertIn("model folder not found", ghost["reason"])
+        # One request in total: the 404 was not retried, the duplicate was
+        # not asked, and the missing folder never reached the server.
+        self.assertEqual(RECEIVED["count"], 1)
+        self.assertEqual((body["recorded"], body["failed"], body["skipped"]), (0, 3, 1))
+
+    def test_missing_folder_is_a_409_for_a_single_run(self):
+        prompt = self._prompt()
+        with StubServer() as url:
+            self._register(name="ghost", url=url)
+            response = self.client.post("/api/generate", json={
+                "prompt_id": prompt["id"], "model_id": "ghost"})
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("model folder not found", response.json()["detail"])
+        self.assertNotIn("count", RECEIVED)
+
+    def test_batch_flags_an_answer_cut_off_at_the_token_cap(self):
+        prompt = self._prompt()
+        REPLY["body"] = json.dumps({"choices": [{
+            "message": {"content": "cut off mid"}, "finish_reason": "length"}]})
+        with StubServer() as url:
+            self._register(name="works", url=url)
+            body = self.client.post("/api/batch", json={"prompt_id": prompt["id"]}).json()
+        result = body["results"][0]
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["finish_reason"], "length")
+        self.assertTrue(result["truncated"])
+        run_json = os.path.join(self.tmp.name, "data", "runs", result["run_id"], "run.json")
+        with open(run_json, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["usage"]["finish_reason"], "length")
+
+    def test_a_complete_answer_is_not_flagged(self):
+        prompt = self._prompt()
+        REPLY["body"] = json.dumps({"choices": [{
+            "message": {"content": "done"}, "finish_reason": "stop"}]})
+        with StubServer() as url:
+            self._register(name="works", url=url)
+            result = self.client.post("/api/batch", json={
+                "prompt_id": prompt["id"]}).json()["results"][0]
+        self.assertEqual(result["finish_reason"], "stop")
+        self.assertFalse(result["truncated"])
 
     def test_batch_with_no_callable_models_conflicts(self):
         prompt = self.client.post("/api/prompts", json={
