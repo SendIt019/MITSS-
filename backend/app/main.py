@@ -12,7 +12,7 @@ the dependency-free pipeline core.
 from __future__ import annotations
 
 import os
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -119,6 +119,10 @@ class NewModel(BaseModel):
     model: str = Field("", description="Name sent in the request body; defaults to the label")
     key_env: str = Field("", description="NAME of the env var holding the key - never the key")
     notes: str = ""
+    settings: Optional[Dict[str, Any]] = Field(
+        None, description="Generation overrides: temperature, top_p, top_k, "
+                          "min_p, presence_penalty, max_tokens, seed, timeout, "
+                          "chat_template_kwargs. Blank = harness defaults.")
 
 
 class EditModel(BaseModel):
@@ -128,6 +132,9 @@ class EditModel(BaseModel):
     model: Optional[str] = None
     key_env: Optional[str] = None
     notes: Optional[str] = None
+    settings: Optional[Dict[str, Any]] = Field(
+        None, description="Replaces the whole settings block; {} clears it; "
+                          "omit to leave it alone")
 
 
 def _guard(call, *args, **kwargs):
@@ -208,7 +215,8 @@ def list_models():
 def register_model(body: NewModel):
     """Register a teammate's model: connection details, never credentials."""
     return _guard(service.register_model, body.name, body.owner, body.url,
-                  body.format, body.model, body.key_env, body.notes)
+                  body.format, body.model, body.key_env, body.notes,
+                  body.settings)
 
 
 @app.get("/api/models/{model_id}")
@@ -220,7 +228,8 @@ def get_model(model_id: str):
 def update_model(model_id: str, body: EditModel):
     """Connection details are editable; the name is not — runs carry it."""
     return _guard(service.update_model, model_id, body.owner, body.url,
-                  body.format, body.model, body.key_env, body.notes)
+                  body.format, body.model, body.key_env, body.notes,
+                  body.settings)
 
 
 @app.delete("/api/models/{model_id}")

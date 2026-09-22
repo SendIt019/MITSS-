@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
+import { describeSettings } from './settings'
 import DiffText, { DiffLegend } from './components/DiffText'
 import Digest from './components/Digest'
 import Inputs from './components/Inputs'
@@ -747,6 +748,11 @@ function RunsTab({ runs, openRun, onOpenRun, onReview, onDelete, busy, runLabel 
               Input: <strong>{openRun.input_name}</strong>
             </p>
           )}
+          {openRun.settings && (
+            <p className="hint" style={{ marginTop: 0 }}>
+              Settings: <span className="mono">{describeSettings(openRun.settings)}</span>
+            </p>
+          )}
 
           <VerdictPicker
             value={openRun.verdict}
@@ -769,6 +775,16 @@ function RunsTab({ runs, openRun, onOpenRun, onReview, onDelete, busy, runLabel 
 
           <h3 className="section">Output</h3>
           <DiffText plain={openRun.output} />
+
+          {openRun.reasoning && (
+            <details className="fold">
+              <summary>
+                Reasoning — what the model thought before answering
+                ({openRun.reasoning_characters} characters)
+              </summary>
+              <DiffText plain={openRun.reasoning} />
+            </details>
+          )}
 
           <details className="fold">
             <summary>The exact prompt that produced this</summary>

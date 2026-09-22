@@ -13,6 +13,7 @@ as a log, not a table.
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime
 from typing import Optional
@@ -34,18 +35,47 @@ def _stamp(iso: str = "") -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def format_settings(settings) -> str:
+    """`temperature=0  max_tokens=8000  enable_thinking=false  timeout=120s`.
+
+    Flat so the line can be grepped; chat_template_kwargs are unpacked
+    because `enable_thinking` is the one people actually look for.
+    """
+    parts = []
+    for name, value in (settings or {}).items():
+        if name == "chat_template_kwargs" and isinstance(value, dict):
+            parts.extend(f"{k}={json.dumps(v)}" for k, v in value.items())
+        elif name == "timeout":
+            parts.append(f"timeout={value:g}s")
+        else:
+            parts.append(f"{name}={value}")
+    return "  ".join(parts)
+
+
 def format_run(run) -> str:
     """The block written when an output is recorded."""
     duration = f"  |  {run.duration_ms}ms" if run.duration_ms else ""
+    settings = getattr(run, "settings", None)
     lines = [
         HEAVY,
         f"{_stamp(run.created_at)}  |  {run.prompt_id} v{run.version}  |  "
         f"{run.model or 'unnamed model'}",
         f"run: {run.id}",
         f"input: {run.input_name or 'none'}  |  source: {run.source}{duration}",
+    ]
+    # Only provider runs carry settings; a pasted run has nothing to say here,
+    # and older blocks in the same file simply lack the line.
+    if settings:
+        lines.append(f"settings: {format_settings(settings)}")
+    lines += [
         LIGHT,
         "PROMPT:",
         run.prompt_text.rstrip() or "(empty)",
+    ]
+    reasoning = getattr(run, "reasoning", "")
+    if reasoning:
+        lines += [LIGHT, "REASONING:", reasoning.rstrip()]
+    lines += [
         LIGHT,
         "OUTPUT:",
         run.output.rstrip() or "(empty)",

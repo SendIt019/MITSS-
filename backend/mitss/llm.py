@@ -21,17 +21,32 @@ Environment variables:
     MITSS_LLM_MODEL      default model name sent in the request body
     MITSS_LLM_MODELS     comma-separated list offered in the interface
     MITSS_LLM_API_KEY    optional; sent as "Authorization: Bearer <key>"
-    MITSS_LLM_TIMEOUT    seconds, default 120
+    MITSS_LLM_TIMEOUT    seconds, default 120; must be a positive finite number
+    MITSS_LLM_PREFLIGHT_TIMEOUT
+                         seconds the one-token probe sent before each run may
+                         take, default 90; 0 disables the probe
+
+Generation settings: a provider can be given per-model overrides for the
+sampling fields below. Whatever was actually sent comes back with the
+completion so a run can record it — a comparison between two outputs is
+meaningless unless it shows whether one of them had thinking on.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
+import socket
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+DEFAULT_TIMEOUT = 120.0
+DEFAULT_PREFLIGHT_TIMEOUT = 90.0
+DEFAULT_TEMPERATURE = 0
 
 
 class LLMError(RuntimeError):
@@ -41,6 +56,165 @@ class LLMError(RuntimeError):
 class ProviderUnavailable(LLMError):
     """The provider cannot run automatically; use the manual paste path."""
 
+
+class LLMConfigError(LLMError):
+    """The provider is misconfigured (bad timeout, bad setting) — fix it, then retry."""
+
+
+class LLMTimeout(LLMError):
+    """The model server accepted the request but never answered in time."""
+
+
+class LLMUnreachable(LLMError):
+    """No server answered at the endpoint at all (refused, no route, DNS)."""
+
+
+class LLMStuck(LLMError):
+    """The server accepts requests but its generation thread is dead.
+
+    mlx_lm.server keeps answering HTTP after its generator crashes, so a run
+    would otherwise hang until the full timeout. Detected by the preflight.
+    """
+
+
+class LLMServerError(LLMError):
+    """The model server answered with an HTTP error status."""
+
+    def __init__(self, message: str, status_code: int):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+# --------------------------------------------------------------------------
+# generation settings
+# --------------------------------------------------------------------------
+
+# Fields the openai-style request body may carry, and how each is checked.
+# Mirrors what mlx_lm.server validates on its side, so a bad value is refused
+# here with a readable message instead of coming back as a bare HTTP 400.
+# (min_p and presence_penalty are here because Qwen's published thinking-mode
+# settings use them and the server honours them.)
+#   name: (accepted types, minimum, maximum)
+_NUMERIC_SETTINGS: Dict[str, tuple] = {
+    "temperature": ((int, float), 0, None),
+    "top_p": ((int, float), 0, 1),
+    "top_k": ((int,), 0, None),
+    "min_p": ((int, float), 0, 1),
+    "presence_penalty": ((int, float), None, None),
+    "max_tokens": ((int,), 1, None),
+    "seed": ((int,), 0, None),
+}
+SETTING_NAMES = tuple(_NUMERIC_SETTINGS) + ("chat_template_kwargs", "timeout")
+
+
+def parse_timeout(value: Any, source: str = "timeout") -> float:
+    """A positive, finite number of seconds — anything else is refused.
+
+    urllib treats 0 and negatives as "no wait", and float('inf') / NaN
+    slip through arithmetic into confusing socket errors. Say so up front.
+    """
+    if isinstance(value, bool) or value is None:
+        raise LLMConfigError(f"{source} must be a positive finite number of seconds, got {value!r}")
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        raise LLMConfigError(
+            f"{source} must be a positive finite number of seconds, got {value!r}"
+        ) from None
+    if math.isnan(seconds) or math.isinf(seconds) or seconds <= 0:
+        raise LLMConfigError(
+            f"{source} must be a positive finite number of seconds, got {value!r}"
+        )
+    return seconds
+
+
+def parse_preflight_timeout(value: Any) -> float:
+    """Like parse_timeout, but 0 is allowed and means "no preflight"."""
+    try:
+        if float(value) == 0:
+            return 0.0
+    except (TypeError, ValueError):
+        pass
+    return parse_timeout(value, "MITSS_LLM_PREFLIGHT_TIMEOUT")
+
+
+def normalize_settings(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Validate per-model generation settings and drop blanks.
+
+    Blank means "use the default": None, "" and missing keys are all removed,
+    so a form with empty boxes round-trips to an empty dict. Unknown names are
+    refused rather than silently ignored — a misspelt `temprature` would
+    otherwise look like it had been applied.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise LLMConfigError("settings must be a JSON object")
+
+    clean: Dict[str, Any] = {}
+    for name, value in raw.items():
+        if value is None or value == "":
+            continue
+        if name not in SETTING_NAMES:
+            raise LLMConfigError(
+                f"unknown setting '{name}'; allowed: {', '.join(SETTING_NAMES)}"
+            )
+        if name == "timeout":
+            clean[name] = parse_timeout(value, "timeout")
+            continue
+        if name == "chat_template_kwargs":
+            if not isinstance(value, dict):
+                raise LLMConfigError("chat_template_kwargs must be a JSON object, "
+                                     "e.g. {\"enable_thinking\": false}")
+            if value:
+                clean[name] = dict(value)
+            continue
+        types, low, high = _NUMERIC_SETTINGS[name]
+        if isinstance(value, bool) or not isinstance(value, types):
+            wanted = "an integer" if types == (int,) else "a number"
+            raise LLMConfigError(f"{name} must be {wanted}, got {value!r}")
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            raise LLMConfigError(f"{name} must be a finite number, got {value!r}")
+        if low is not None and value < low:
+            raise LLMConfigError(f"{name} must be at least {low}, got {value!r}")
+        if high is not None and value > high:
+            raise LLMConfigError(f"{name} must be at most {high}, got {value!r}")
+        clean[name] = value
+    return clean
+
+
+def describe_settings(settings: Optional[Dict[str, Any]]) -> str:
+    """One readable line, e.g. `temperature=0  timeout=120s  enable_thinking=false`."""
+    if not settings:
+        return ""
+    parts = []
+    for name, value in settings.items():
+        if name == "chat_template_kwargs" and isinstance(value, dict):
+            parts.extend(f"{k}={json.dumps(v)}" for k, v in value.items())
+        elif name == "timeout":
+            parts.append(f"timeout={value:g}s")
+        else:
+            parts.append(f"{name}={value}")
+    return "  ".join(parts)
+
+
+@dataclass
+class Completion:
+    """What came back, plus exactly which settings the request carried.
+
+    `reasoning` is a thinking model's chain of thought when the server
+    returns it separately (mlx_lm.server does, as `message.reasoning`).
+    Empty for models that do not think or servers that fold it into the text.
+    """
+
+    text: str
+    settings: Dict[str, Any] = field(default_factory=dict)
+    reasoning: str = ""
+
+
+# --------------------------------------------------------------------------
+# providers
+# --------------------------------------------------------------------------
 
 class LLMProvider(ABC):
     """Interface every provider implements.
@@ -64,6 +238,14 @@ class LLMProvider(ABC):
         `model` overrides the configured default for this one call, so an
         interface can offer a choice without reconfiguring the provider.
         """
+
+    def generate(self, prompt: str, model: Optional[str] = None) -> Completion:
+        """Like complete(), but also reports the settings that were sent.
+
+        Providers that do not expose settings report none; the run is still
+        recorded, just without a settings line.
+        """
+        return Completion(self.complete(prompt, model), {})
 
     @property
     def models(self) -> List[str]:
@@ -105,7 +287,8 @@ class HttpProvider(LLMProvider):
     """Calls any HTTP endpoint. Standard library only — no vendor SDK.
 
     Two body shapes are supported. `openai` sends the chat-completions shape
-    that llama.cpp, vLLM, Ollama and LM Studio all accept. `raw` sends
+    that llama.cpp, vLLM, Ollama, LM Studio and mlx_lm.server all accept, and
+    is the only shape generation settings are added to. `raw` sends
     {"prompt": ...} and accepts a completion under any of several common keys.
     """
 
@@ -113,17 +296,38 @@ class HttpProvider(LLMProvider):
 
     def __init__(self, url: Optional[str] = None, fmt: Optional[str] = None,
                  model: Optional[str] = None, timeout: Optional[float] = None,
-                 key_env: Optional[str] = None):
+                 key_env: Optional[str] = None,
+                 settings: Optional[Dict[str, Any]] = None,
+                 preflight: Optional[float] = None):
         self.url = url or os.environ.get("MITSS_LLM_URL", "")
         self.format = (fmt or os.environ.get("MITSS_LLM_FORMAT", "openai")).lower()
         self.model = model or os.environ.get("MITSS_LLM_MODEL", "local-model")
         # Which environment variable holds the key — never the key itself, so
         # a provider built from a stored registration still cannot persist one.
         self.key_env = key_env or "MITSS_LLM_API_KEY"
-        try:
-            self.timeout = float(timeout or os.environ.get("MITSS_LLM_TIMEOUT", "120"))
-        except ValueError:
-            self.timeout = 120.0
+        # Per-model overrides (a registration's settings). Validated again
+        # here so a hand-edited model.json cannot smuggle in a bad value.
+        self.settings = normalize_settings(settings)
+        # Timeout precedence: the model's own setting, then the constructor,
+        # then the environment, then the default. Bad values are refused now,
+        # not at the moment a run is already in flight.
+        if "timeout" in self.settings:
+            self.timeout = self.settings["timeout"]
+        elif timeout is not None:
+            self.timeout = parse_timeout(timeout, "timeout")
+        else:
+            self.timeout = parse_timeout(
+                os.environ.get("MITSS_LLM_TIMEOUT", str(DEFAULT_TIMEOUT)),
+                "MITSS_LLM_TIMEOUT",
+            )
+        # How long the one-token probe before a run may take. It has to
+        # cover a model swap (loading a 12B model takes tens of seconds), so
+        # it is not tiny; it only needs to be far shorter than the run timeout.
+        self.preflight_timeout = parse_preflight_timeout(
+            preflight if preflight is not None
+            else os.environ.get("MITSS_LLM_PREFLIGHT_TIMEOUT",
+                                str(DEFAULT_PREFLIGHT_TIMEOUT))
+        )
 
     @property
     def available(self) -> bool:
@@ -155,11 +359,29 @@ class HttpProvider(LLMProvider):
             "format": self.format,
             "model": self.model,
             "models": self.models,
+            "timeout": self.timeout,
+            "preflight_timeout": self.preflight_timeout,
+            "settings": self.settings,
             # Presence only. The value is never exposed.
             "api_key_set": bool(os.environ.get(self.key_env)),
         }
 
+    def request_settings(self) -> Dict[str, Any]:
+        """The generation fields this provider will put in an openai body.
+
+        The default is unchanged from before settings existed: temperature 0
+        and nothing else, so the server's own caps apply.
+        """
+        sent: Dict[str, Any] = {"temperature": DEFAULT_TEMPERATURE}
+        for name, value in self.settings.items():
+            if name != "timeout":
+                sent[name] = value
+        return sent
+
     def complete(self, prompt: str, model: Optional[str] = None) -> str:
+        return self.generate(prompt, model).text
+
+    def generate(self, prompt: str, model: Optional[str] = None) -> Completion:
         if not self.url:
             raise ProviderUnavailable(
                 "MITSS_LLM_URL is not set; cannot call a model automatically"
@@ -171,33 +393,100 @@ class HttpProvider(LLMProvider):
         chosen = model or self.model
 
         if self.format == "openai":
-            body = {
+            sent = self.request_settings()
+            body: Dict[str, Any] = {
                 "model": chosen,
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0,
             }
+            body.update(sent)
         else:
+            sent = {}
             body = {"model": chosen, "prompt": prompt}
 
+        # The snapshot a run keeps: what went in the body, plus the client
+        # timeout that bounded the wait. Never the key.
+        used = dict(sent)
+        used["timeout"] = self.timeout
+
+        if self.format == "openai" and self.preflight_timeout > 0:
+            self._preflight(chosen)
+
+        payload = self._post(body, self.timeout)
+        text, reasoning = self._parse(payload)
+        return Completion(text, used, reasoning)
+
+    def _preflight(self, chosen: str) -> None:
+        """Ask for one token before the real run.
+
+        A server whose generation thread has died still answers HTTP, so the
+        only way to tell "stuck" from "slow" is to ask for a token and give
+        it a deadline. If the model needs loading, that happens here rather
+        than in the run, so the deadline covers a swap.
+        """
+        probe = {
+            "model": chosen,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "temperature": 0,
+        }
+        try:
+            self._post(probe, self.preflight_timeout)
+        except LLMTimeout:
+            raise LLMStuck(
+                f"model server is stuck, restart mlx_lm.server: {self.url} "
+                f"accepted a one-token probe but did not answer it within "
+                f"{self.preflight_timeout:g}s (the prompt was not sent)"
+            ) from None
+
+    def _post(self, body: Dict[str, Any], timeout: float) -> str:
         request = urllib.request.Request(
             self.url,
             data=json.dumps(body).encode("utf-8"),
             headers=self._headers(),
             method="POST",
         )
-
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                payload = response.read().decode("utf-8")
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             # Deliberately does not echo the request, which carries the key.
-            raise LLMError(f"model endpoint returned HTTP {exc.code}") from None
+            # The server's own error text is safe and usually says why.
+            raise LLMServerError(
+                f"model server returned HTTP {exc.code}{_server_said(exc)}",
+                exc.code,
+            ) from None
         except urllib.error.URLError as exc:
-            raise LLMError(f"could not reach the model endpoint: {exc.reason}") from None
+            reason = exc.reason
+            if isinstance(reason, (socket.timeout, TimeoutError)):
+                raise LLMTimeout(self._timeout_message(timeout)) from None
+            if isinstance(reason, ConnectionRefusedError):
+                raise LLMUnreachable(
+                    f"could not connect to the model server at {self.url} "
+                    "(connection refused) - is mlx_lm.server running?"
+                ) from None
+            raise LLMUnreachable(
+                f"could not reach the model server at {self.url}: {reason}"
+            ) from None
+        except (socket.timeout, TimeoutError):
+            # A timeout while reading the body surfaces here, not as URLError.
+            raise LLMTimeout(self._timeout_message(timeout)) from None
+        except ConnectionResetError:
+            raise LLMUnreachable(
+                f"the model server at {self.url} dropped the connection "
+                "mid-request - it may have crashed; check its log"
+            ) from None
         except OSError as exc:
-            raise LLMError(f"could not reach the model endpoint: {exc}") from None
+            raise LLMUnreachable(
+                f"could not reach the model server at {self.url}: {exc}"
+            ) from None
 
-        return self._extract(payload)
+    def _timeout_message(self, timeout: float) -> str:
+        return (
+            f"the model server at {self.url} did not answer within "
+            f"{timeout:g}s - it may still be generating (raise the "
+            "model's timeout setting or MITSS_LLM_TIMEOUT), or mlx_lm.server "
+            "may be stuck: if the GPU is idle, restart it"
+        )
 
     def _headers(self) -> Dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -206,17 +495,29 @@ class HttpProvider(LLMProvider):
             headers["Authorization"] = f"Bearer {key}"
         return headers
 
+    @classmethod
+    def _extract(cls, payload: str) -> str:
+        """The completion text only (see _parse)."""
+        return cls._parse(payload)[0]
+
     @staticmethod
-    def _extract(payload: str) -> str:
-        """Pull the completion text out of a variety of response shapes."""
+    def _parse(payload: str) -> tuple:
+        """(text, reasoning) out of a variety of response shapes.
+
+        mlx_lm.server puts a thinking model's chain of thought in
+        `message.reasoning` and omits `content` entirely when the answer
+        never came (max_tokens ran out mid-think). That is still a result
+        worth keeping - it says the cap was too low - so it comes back as an
+        empty text with the reasoning attached rather than as an error.
+        """
         try:
             data = json.loads(payload)
         except json.JSONDecodeError:
             # Some endpoints just return the text.
-            return payload
+            return payload, ""
 
         if isinstance(data, str):
-            return data
+            return data, ""
 
         if isinstance(data, dict):
             choices = data.get("choices")
@@ -224,18 +525,56 @@ class HttpProvider(LLMProvider):
                 first = choices[0]
                 if isinstance(first, dict):
                     message = first.get("message")
-                    if isinstance(message, dict) and isinstance(message.get("content"), str):
-                        return message["content"]
+                    if isinstance(message, dict):
+                        reasoning = message.get("reasoning")
+                        if not isinstance(reasoning, str):
+                            reasoning = message.get("reasoning_content")
+                        if not isinstance(reasoning, str):
+                            reasoning = ""
+                        if isinstance(message.get("content"), str):
+                            return message["content"], reasoning
+                        if reasoning:
+                            return "", reasoning
                     if isinstance(first.get("text"), str):
-                        return first["text"]
+                        return first["text"], ""
             for key in ("completion", "response", "output", "text", "content"):
                 if isinstance(data.get(key), str):
-                    return data[key]
+                    return data[key], ""
 
         raise LLMError(
             "could not find completion text in the model response; expected an "
             "openai-style 'choices' array or a completion/response/output/text key"
         )
+
+
+def _server_said(exc: urllib.error.HTTPError, limit: int = 200) -> str:
+    """A short quote of the server's error body, if it sent one.
+
+    Response bodies come from the server, never from our request, so they
+    cannot carry the key. Trimmed so a stack trace does not flood the UI.
+    """
+    try:
+        raw = exc.read().decode("utf-8", "replace").strip()
+    except Exception:  # noqa: BLE001 - any failure to read just means no quote
+        return ""
+    finally:
+        exc.close()
+    if not raw:
+        return ""
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            inner = data.get("error")
+            if isinstance(inner, dict):
+                inner = inner.get("message")
+            if isinstance(inner, str):
+                raw = inner
+    except json.JSONDecodeError:
+        pass
+    raw = " ".join(raw.split())
+    if len(raw) > limit:
+        raw = raw[:limit] + "..."
+    return f": {raw}"
 
 
 _REGISTRY: Dict[str, type] = {
@@ -257,7 +596,12 @@ def available_providers() -> Dict[str, str]:
 
 
 def get_provider(name: Optional[str] = None) -> LLMProvider:
-    """Return the configured provider. Unknown names fall back to manual."""
+    """Return the configured provider. Unknown names fall back to manual.
+
+    Raises LLMConfigError if the provider's configuration is unusable (for
+    example MITSS_LLM_TIMEOUT set to 0); that is a fix-your-environment
+    error, not a model failure, and callers report it as such.
+    """
     key = (name or os.environ.get("MITSS_LLM_PROVIDER", "manual")).lower()
     provider_class = _REGISTRY.get(key)
     if provider_class is None:

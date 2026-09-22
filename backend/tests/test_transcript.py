@@ -53,6 +53,30 @@ class Transcript(unittest.TestCase):
         self.assertIn("source: provider", body)
         self.assertIn("1840ms", body)
 
+    def test_provider_runs_record_the_settings_they_used(self):
+        self.store.create_run(self.prompt.id, 1, "qwen3.5-9b", "out",
+                              input_id=self.input.id, source="provider",
+                              settings={"temperature": 1.0, "max_tokens": 8000,
+                                        "chat_template_kwargs": {"enable_thinking": False},
+                                        "timeout": 1800.0})
+        body = self.text()
+        self.assertIn("settings: temperature=1.0  max_tokens=8000  "
+                      "enable_thinking=false  timeout=1800s", body)
+
+    def test_reasoning_gets_its_own_section_before_the_output(self):
+        self.store.create_run(self.prompt.id, 1, "qwen3.5-9b", "The answer.",
+                              source="provider", reasoning="Let me think.")
+        body = self.text()
+        self.assertIn("REASONING:\nLet me think.", body)
+        self.assertLess(body.index("REASONING:"), body.index("OUTPUT:"))
+        self.assertLess(body.index("PROMPT:"), body.index("REASONING:"))
+        self.store.create_run(self.prompt.id, 1, "hand", "out")
+        self.assertEqual(self.text().count("REASONING:"), 1)
+
+    def test_pasted_runs_have_no_settings_line(self):
+        self.store.create_run(self.prompt.id, 1, "hand", "out")
+        self.assertNotIn("settings:", self.text())
+
     def test_verdict_is_appended_not_rewritten(self):
         run = self.store.create_run(self.prompt.id, 1, "m", "out")
         before = self.text()

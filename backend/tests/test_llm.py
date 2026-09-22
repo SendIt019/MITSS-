@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -17,17 +18,27 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mitss.llm import (
     HttpProvider,
+    LLMConfigError,
     LLMError,
     LLMProvider,
+    LLMServerError,
+    LLMStuck,
+    LLMTimeout,
+    LLMUnreachable,
     ManualProvider,
     ProviderUnavailable,
     available_providers,
+    describe_settings,
     get_provider,
+    normalize_settings,
+    parse_preflight_timeout,
+    parse_timeout,
     register_provider,
 )
 
-# What the stub server should reply with, set per test.
-REPLY = {"body": "{}", "status": 200}
+# What the stub server should reply with, set per test. `delay` (seconds)
+# makes it sit on the request first, to provoke a client timeout.
+REPLY = {"body": "{}", "status": 200, "delay": 0}
 RECEIVED = {}
 
 
@@ -35,7 +46,10 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         RECEIVED["body"] = json.loads(self.rfile.read(length).decode("utf-8"))
+        RECEIVED.setdefault("bodies", []).append(RECEIVED["body"])
         RECEIVED["auth"] = self.headers.get("Authorization")
+        if REPLY.get("delay"):
+            time.sleep(REPLY["delay"])
         self.send_response(REPLY["status"])
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -76,9 +90,11 @@ class Manual(unittest.TestCase):
 class Http(unittest.TestCase):
     def setUp(self):
         for key in ("MITSS_LLM_URL", "MITSS_LLM_API_KEY", "MITSS_LLM_FORMAT",
-                    "MITSS_LLM_MODEL", "MITSS_LLM_MODELS"):
+                    "MITSS_LLM_MODEL", "MITSS_LLM_MODELS", "MITSS_LLM_TIMEOUT"):
             os.environ.pop(key, None)
+        os.environ.pop("MITSS_LLM_PREFLIGHT_TIMEOUT", None)
         RECEIVED.clear()
+        REPLY["delay"] = 0
 
     def test_unavailable_without_a_url(self):
         provider = HttpProvider()
@@ -120,6 +136,102 @@ class Http(unittest.TestCase):
         with StubServer() as url:
             with self.assertRaises(LLMError):
                 HttpProvider(url=url).complete("x")
+
+    def test_reasoning_is_captured_beside_the_answer(self):
+        # mlx_lm.server puts a thinking model's chain of thought in its own
+        # field; the harness keeps it, verbatim, apart from the output.
+        REPLY["status"] = 200
+        REPLY["body"] = json.dumps({"choices": [{"message": {
+            "role": "assistant", "reasoning": "Let me think...",
+            "content": "The answer.",
+        }}]})
+        with StubServer() as url:
+            completion = HttpProvider(url=url).generate("x")
+        self.assertEqual(completion.text, "The answer.")
+        self.assertEqual(completion.reasoning, "Let me think...")
+
+    def test_reasoning_without_an_answer_is_kept_with_an_empty_output(self):
+        # The shape when a thinking model runs out of tokens mid-think: no
+        # content at all. That is a result (the cap was too low), not an error.
+        REPLY["status"] = 200
+        REPLY["body"] = json.dumps({"choices": [{
+            "finish_reason": "length",
+            "message": {"role": "assistant", "reasoning": "Let me think..."},
+        }]})
+        with StubServer() as url:
+            completion = HttpProvider(url=url).generate("x")
+        self.assertEqual(completion.text, "")
+        self.assertEqual(completion.reasoning, "Let me think...")
+
+    def test_reasoning_content_alias_is_understood(self):
+        REPLY["status"] = 200
+        REPLY["body"] = json.dumps({"choices": [{"message": {
+            "reasoning_content": "hmm", "content": "ok",
+        }}]})
+        with StubServer() as url:
+            completion = HttpProvider(url=url).generate("x")
+        self.assertEqual((completion.text, completion.reasoning), ("ok", "hmm"))
+
+    # -- preflight ----------------------------------------------------------
+
+    def test_preflight_sends_a_one_token_probe_for_the_same_model_first(self):
+        REPLY["status"] = 200
+        REPLY["body"] = json.dumps({"completion": "ok"})
+        with StubServer() as url:
+            HttpProvider(url=url, model="m", settings={"max_tokens": 500}).complete("real")
+        probe, real = RECEIVED["bodies"]
+        self.assertEqual(probe["model"], "m")
+        self.assertEqual(probe["max_tokens"], 1)
+        self.assertEqual(probe["messages"][0]["content"], "ping")
+        self.assertEqual(real["messages"][0]["content"], "real")
+        self.assertEqual(real["max_tokens"], 500)
+
+    def test_preflight_can_be_disabled(self):
+        REPLY["status"] = 200
+        REPLY["body"] = json.dumps({"completion": "ok"})
+        with StubServer() as url:
+            HttpProvider(url=url, preflight=0).complete("real")
+        self.assertEqual(len(RECEIVED["bodies"]), 1)
+        os.environ["MITSS_LLM_PREFLIGHT_TIMEOUT"] = "0"
+        with StubServer() as url:
+            RECEIVED.clear()
+            HttpProvider(url=url).complete("real")
+        self.assertEqual(len(RECEIVED["bodies"]), 1)
+
+    def test_preflight_skips_raw_bodies(self):
+        REPLY["status"] = 200
+        REPLY["body"] = json.dumps({"completion": "ok"})
+        with StubServer() as url:
+            HttpProvider(url=url, fmt="raw").complete("real")
+        self.assertEqual(len(RECEIVED["bodies"]), 1)
+
+    def test_stuck_server_fails_fast_with_the_restart_message(self):
+        REPLY["status"] = 200
+        REPLY["body"] = json.dumps({"completion": "late"})
+        REPLY["delay"] = 1.5
+        started = time.monotonic()
+        with StubServer() as url:
+            with self.assertRaises(LLMStuck) as caught:
+                HttpProvider(url=url, timeout=30, preflight=0.3).complete("real")
+        self.assertLess(time.monotonic() - started, 5)
+        message = str(caught.exception)
+        self.assertIn("model server is stuck, restart mlx_lm.server", message)
+        self.assertIn("prompt was not sent", message)
+        # Only the probe went out.
+        self.assertEqual(len(RECEIVED["bodies"]), 1)
+
+    def test_preflight_timeout_env_validated_like_the_timeout_but_allows_zero(self):
+        self.assertEqual(parse_preflight_timeout("0"), 0.0)
+        self.assertEqual(parse_preflight_timeout(45), 45.0)
+        for bad in ("-1", "inf", "nan", "soon"):
+            with self.assertRaises(LLMConfigError, msg=bad):
+                parse_preflight_timeout(bad)
+        os.environ["MITSS_LLM_PREFLIGHT_TIMEOUT"] = "-1"
+        with self.assertRaises(LLMConfigError):
+            HttpProvider(url="http://x")
+        os.environ.pop("MITSS_LLM_PREFLIGHT_TIMEOUT", None)
+        self.assertEqual(HttpProvider(url="http://x").preflight_timeout, 90.0)
+        self.assertEqual(HttpProvider(url="http://x").describe()["preflight_timeout"], 90.0)
 
     def test_http_error_is_reported_without_echoing_the_request(self):
         REPLY["status"] = 401
@@ -184,6 +296,153 @@ class Http(unittest.TestCase):
         provider = HttpProvider(url="http://127.0.0.1:9/never", timeout=2)
         with self.assertRaises(LLMError):
             provider.complete("x")
+
+    # -- what is sent, by default and with settings -----------------------
+
+    def test_default_body_is_temperature_zero_and_nothing_else(self):
+        # The pre-settings behaviour, pinned: no max_tokens, no sampling
+        # fields, so the server's own caps are the only ones that apply.
+        REPLY["status"] = 200
+        REPLY["body"] = json.dumps({"completion": "ok"})
+        with StubServer() as url:
+            HttpProvider(url=url).complete("x")
+        body = RECEIVED["body"]
+        self.assertEqual(body["temperature"], 0)
+        for absent in ("max_tokens", "top_p", "top_k", "seed",
+                       "chat_template_kwargs", "timeout"):
+            self.assertNotIn(absent, body)
+
+    def test_settings_reach_the_body_and_timeout_stays_client_side(self):
+        REPLY["status"] = 200
+        REPLY["body"] = json.dumps({"completion": "ok"})
+        settings = {"temperature": 1.0, "top_p": 0.95, "top_k": 20,
+                    "min_p": 0.0, "presence_penalty": 1.5, "max_tokens": 4096,
+                    "seed": 7, "timeout": 30,
+                    "chat_template_kwargs": {"enable_thinking": False}}
+        with StubServer() as url:
+            completion = HttpProvider(url=url, settings=settings).generate("x")
+        body = RECEIVED["body"]
+        self.assertEqual(body["temperature"], 1.0)
+        self.assertEqual(body["top_p"], 0.95)
+        self.assertEqual(body["top_k"], 20)
+        self.assertEqual(body["presence_penalty"], 1.5)
+        self.assertEqual(body["max_tokens"], 4096)
+        self.assertEqual(body["seed"], 7)
+        self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
+        self.assertNotIn("timeout", body)
+        # The snapshot the run will keep: everything sent, plus the timeout.
+        self.assertEqual(completion.text, "ok")
+        self.assertEqual(completion.settings["temperature"], 1.0)
+        self.assertEqual(completion.settings["timeout"], 30.0)
+        self.assertEqual(completion.settings["chat_template_kwargs"],
+                         {"enable_thinking": False})
+
+    def test_settings_are_not_added_to_raw_bodies(self):
+        REPLY["status"] = 200
+        REPLY["body"] = json.dumps({"completion": "ok"})
+        with StubServer() as url:
+            completion = HttpProvider(url=url, fmt="raw",
+                                      settings={"temperature": 0.7}).generate("x")
+        self.assertNotIn("temperature", RECEIVED["body"])
+        self.assertEqual(list(completion.settings), ["timeout"])
+
+    def test_blank_settings_mean_the_defaults(self):
+        self.assertEqual(normalize_settings(None), {})
+        self.assertEqual(normalize_settings({"temperature": "", "top_p": None,
+                                             "chat_template_kwargs": {}}), {})
+
+    def test_bad_settings_are_refused_with_the_field_named(self):
+        for bad, needle in [
+            ({"temprature": 1}, "unknown setting 'temprature'"),
+            ({"temperature": -1}, "temperature must be at least 0"),
+            ({"temperature": "hot"}, "temperature must be a number"),
+            ({"top_p": 1.5}, "top_p must be at most 1"),
+            ({"top_k": 2.5}, "top_k must be an integer"),
+            ({"top_k": True}, "top_k must be an integer"),
+            ({"max_tokens": 0}, "max_tokens must be at least 1"),
+            ({"seed": -3}, "seed must be at least 0"),
+            ({"timeout": 0}, "timeout must be a positive finite number"),
+            ({"chat_template_kwargs": "no"}, "chat_template_kwargs must be a JSON object"),
+            ("not a dict", "settings must be a JSON object"),
+        ]:
+            with self.assertRaises(LLMConfigError, msg=repr(bad)) as caught:
+                normalize_settings(bad)
+            self.assertIn(needle, str(caught.exception))
+
+    def test_describe_settings_reads_as_one_line(self):
+        line = describe_settings({"temperature": 0, "timeout": 120.0,
+                                  "chat_template_kwargs": {"enable_thinking": False}})
+        self.assertEqual(line, "temperature=0  timeout=120s  enable_thinking=false")
+        self.assertEqual(describe_settings(None), "")
+
+    # -- timeout validation -----------------------------------------------
+
+    def test_timeout_rejects_zero_negative_inf_nan_and_junk(self):
+        for bad in (0, -1, "0", "-5", float("inf"), "inf", float("nan"), "nan",
+                    "", "soon", None, True):
+            with self.assertRaises(LLMConfigError, msg=repr(bad)) as caught:
+                parse_timeout(bad, "MITSS_LLM_TIMEOUT")
+            self.assertIn("MITSS_LLM_TIMEOUT must be a positive finite number",
+                          str(caught.exception))
+        self.assertEqual(parse_timeout("1800"), 1800.0)
+        self.assertEqual(parse_timeout(0.5), 0.5)
+
+    def test_bad_timeout_env_is_refused_at_construction_not_at_call_time(self):
+        os.environ["MITSS_LLM_TIMEOUT"] = "0"
+        try:
+            with self.assertRaises(LLMConfigError) as caught:
+                HttpProvider(url="http://127.0.0.1:9/never")
+        finally:
+            os.environ.pop("MITSS_LLM_TIMEOUT", None)
+        self.assertIn("MITSS_LLM_TIMEOUT", str(caught.exception))
+        self.assertIn("'0'", str(caught.exception))
+
+    def test_timeout_precedence_setting_then_argument_then_env(self):
+        os.environ["MITSS_LLM_TIMEOUT"] = "45"
+        try:
+            self.assertEqual(HttpProvider(url="http://x").timeout, 45.0)
+            self.assertEqual(HttpProvider(url="http://x", timeout=9).timeout, 9.0)
+            self.assertEqual(HttpProvider(url="http://x", timeout=9,
+                                          settings={"timeout": 3}).timeout, 3.0)
+        finally:
+            os.environ.pop("MITSS_LLM_TIMEOUT", None)
+        self.assertEqual(HttpProvider(url="http://x").timeout, 120.0)
+
+    # -- one error per cause ---------------------------------------------
+
+    def test_timeout_is_its_own_error_and_says_what_to_do(self):
+        REPLY["status"] = 200
+        REPLY["body"] = json.dumps({"completion": "late"})
+        REPLY["delay"] = 1.5
+        with StubServer() as url:
+            with self.assertRaises(LLMTimeout) as caught:
+                HttpProvider(url=url, timeout=0.3).complete("x")
+        message = str(caught.exception)
+        self.assertIn("did not answer within 0.3s", message)
+        self.assertIn("restart", message)
+
+    def test_refused_connection_is_its_own_error(self):
+        with self.assertRaises(LLMUnreachable) as caught:
+            HttpProvider(url="http://127.0.0.1:9/never", timeout=2).complete("x")
+        message = str(caught.exception)
+        self.assertIn("connection refused", message)
+        self.assertIn("mlx_lm.server running", message)
+
+    def test_server_error_carries_status_and_the_servers_own_words(self):
+        REPLY["status"] = 500
+        REPLY["body"] = json.dumps({"error": "[metal::malloc] Resource limit exceeded"})
+        with StubServer() as url:
+            os.environ["MITSS_LLM_API_KEY"] = "super-secret-value"
+            try:
+                with self.assertRaises(LLMServerError) as caught:
+                    HttpProvider(url=url).complete("x")
+            finally:
+                os.environ.pop("MITSS_LLM_API_KEY", None)
+        self.assertEqual(caught.exception.status_code, 500)
+        message = str(caught.exception)
+        self.assertIn("HTTP 500", message)
+        self.assertIn("Resource limit exceeded", message)
+        self.assertNotIn("super-secret-value", message)
 
 
 class Registry(unittest.TestCase):

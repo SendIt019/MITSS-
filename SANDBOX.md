@@ -22,7 +22,8 @@ Set these in `backend/.env`, then restart `./dev.sh`.
 | `MITSS_LLM_MODEL` | no | Default model name sent in the request body |
 | `MITSS_LLM_MODELS` | no | Comma-separated list shown in the UI's **Run on ▾** dropdown. Falls back to `MITSS_LLM_MODEL` |
 | `MITSS_LLM_API_KEY` | no | Sent as `Authorization: Bearer <key>`. Presence only is ever exposed |
-| `MITSS_LLM_TIMEOUT` | no | Request timeout in seconds (default `120`) |
+| `MITSS_LLM_TIMEOUT` | no | Request timeout in seconds (default `120`). Must be a positive finite number; `0`, negatives, `inf`, `nan` and non-numbers are refused with a clear error on `/api/llm` and on generate. A registered model's own `timeout` setting overrides it |
+| `MITSS_LLM_PREFLIGHT_TIMEOUT` | no | Seconds the one-token probe sent before each run may take (default `90`; `0` disables it). A server whose generation thread has died still answers HTTP, so the probe is how a run fails in seconds with "model server is stuck, restart mlx_lm.server" instead of hanging until the timeout |
 
 Example `backend/.env`:
 

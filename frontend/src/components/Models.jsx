@@ -1,6 +1,9 @@
 import { useState } from 'react'
 import { api } from '../api'
 import { Card, Empty, Field } from './Panels'
+import {
+  BLANK_SETTINGS, SETTING_FIELDS, describeSettings, formToSettings, settingsToForm,
+} from '../settings'
 
 // The team model registry: how a teammate hands their model to the operator.
 //
@@ -8,8 +11,12 @@ import { Card, Empty, Field } from './Panels'
 // an environment variable set on the machine running the backend — the backend
 // reads it at call time and never stores or returns the value.
 
+// Generation settings live on the registration too, so "run qwen with
+// thinking off and a 30-minute timeout" is a property of the model, not
+// something remembered per run. Blank boxes mean the harness defaults.
 const BLANK = {
   name: '', owner: '', url: '', format: 'openai', model: '', key_env: '', notes: '',
+  ...BLANK_SETTINGS,
 }
 
 export default function Models({ models, onChanged, busy, guard, say }) {
@@ -25,7 +32,15 @@ export default function Models({ models, onChanged, busy, guard, say }) {
       name: entry.name, owner: entry.owner, url: entry.url,
       format: entry.format, model: entry.model, key_env: entry.key_env,
       notes: entry.notes,
+      ...settingsToForm(entry.settings),
     })
+  }
+
+  // Split the flat form back into the registration body and its settings.
+  const payload = () => {
+    const { name, owner, url, format, model, key_env, notes } = form
+    return { name, owner, url, format, model, key_env, notes,
+             settings: formToSettings(form) }
   }
 
   const reset = () => { setEditing(''); setForm(BLANK) }
@@ -33,11 +48,11 @@ export default function Models({ models, onChanged, busy, guard, say }) {
   const save = () =>
     guard(async () => {
       if (editing) {
-        const { name, ...patch } = form
+        const { name, ...patch } = payload()
         await api.updateModel(editing, patch)
         say('Model updated')
       } else {
-        await api.registerModel(form)
+        await api.registerModel(payload())
         say('Model registered — it now appears in Run on and in batch runs')
       }
       reset()
@@ -79,6 +94,9 @@ export default function Models({ models, onChanged, busy, guard, say }) {
                     <span className="muted"> · key from {entry.key_env}
                       {entry.key_set ? ' (set)' : ' (NOT SET)'}
                     </span>
+                  )}
+                  {entry.settings && Object.keys(entry.settings).length > 0 && (
+                    <span className="muted mono"> · {describeSettings(entry.settings)}</span>
                   )}
                 </span>
                 <span className="row" style={{ gap: 6 }}>
@@ -138,6 +156,31 @@ export default function Models({ models, onChanged, busy, guard, say }) {
             <input type="text" value={form.notes} onChange={set('notes')}
                    placeholder="quantised q4, runs on the lab box" />
           </Field>
+        </div>
+
+        <p className="hint" style={{ marginTop: 14, marginBottom: 6 }}>
+          Generation settings — blank means the harness default (temperature 0,
+          no token cap beyond the server's, timeout from MITSS_LLM_TIMEOUT).
+          Every run records the settings it actually used.
+        </p>
+        <div className="row">
+          {SETTING_FIELDS.map((f) => (
+            <Field key={f.key} label={f.label}>
+              <input type="text" inputMode="decimal" value={form[f.key]}
+                     onChange={set(f.key)} placeholder={f.hint} />
+            </Field>
+          ))}
+          <div className="grow">
+            <label className="field">Thinking (Qwen 3 and similar)</label>
+            <select value={form.thinking} onChange={set('thinking')}>
+              <option value="">model default</option>
+              <option value="off">off (enable_thinking: false)</option>
+              <option value="on">on (enable_thinking: true)</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="row" style={{ marginTop: 10 }}>
           <button className="primary" onClick={save}
                   disabled={busy || !form.name.trim()}>
             {editing ? 'Save changes' : 'Register'}

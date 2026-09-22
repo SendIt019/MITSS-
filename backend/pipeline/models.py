@@ -179,6 +179,14 @@ class Run:
     reviewed_at: str = ""
     source: str = "paste"          # paste | provider
     duration_ms: Optional[int] = None
+    # The generation settings the provider actually sent (temperature,
+    # max_tokens, enable_thinking, timeout...). A snapshot, never a reference
+    # to a registration: the registration can change, the run cannot. None
+    # for pasted runs and for runs recorded before settings existed.
+    settings: Optional[Dict[str, Any]] = None
+    # A thinking model's chain of thought, when the server returns it apart
+    # from the answer. Captured verbatim like the output; never judged.
+    reasoning: str = ""
 
     @property
     def output_words(self) -> int:
@@ -200,13 +208,16 @@ class Run:
             "reviewed_at": self.reviewed_at,
             "source": self.source,
             "duration_ms": self.duration_ms,
+            "settings": self.settings,
             "output_words": self.output_words,
             "output_characters": len(self.output),
+            "reasoning_characters": len(self.reasoning),
         }
 
     def to_dict(self) -> Dict[str, Any]:
         data = self.summary()
         data["output"] = self.output
+        data["reasoning"] = self.reasoning
         data["prompt_text"] = self.prompt_text
         data["template_text"] = self.template_text
         data["input_text"] = self.input_text
@@ -242,6 +253,10 @@ class ModelEntry:
     notes: str = ""
     created_at: str = ""
     updated_at: str = ""
+    # Generation overrides for this model (temperature, top_p, top_k, min_p,
+    # presence_penalty, max_tokens, seed, timeout, chat_template_kwargs).
+    # Empty means the harness defaults: temperature 0 and MITSS_LLM_TIMEOUT.
+    settings: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def callable(self) -> bool:
@@ -258,6 +273,7 @@ class ModelEntry:
             "model": self.model or self.name,
             "key_env": self.key_env,
             "notes": self.notes,
+            "settings": dict(self.settings),
             "callable": self.callable,
             "created_at": self.created_at,
             "updated_at": self.updated_at,

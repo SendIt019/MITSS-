@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -22,7 +23,7 @@ from pipeline import NotFound, Store, build_digest, digest_text
 
 # What the stub server replies with, and what it saw, set per test.
 REPLY = {"body": json.dumps({"choices": [{"message": {"content": "stub reply"}}]}),
-         "status": 200}
+         "status": 200, "delay": 0}
 RECEIVED = {}
 
 
@@ -31,6 +32,8 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         RECEIVED["body"] = json.loads(self.rfile.read(length).decode("utf-8"))
         RECEIVED["auth"] = self.headers.get("Authorization")
+        if REPLY.get("delay"):
+            time.sleep(REPLY["delay"])
         self.send_response(REPLY["status"])
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -106,6 +109,30 @@ class Registry(unittest.TestCase):
             raw = handle.read()
         self.assertIn("TEAM_7B_KEY", raw)     # the name of the variable
         self.assertNotIn("api_key", raw)      # never a value-shaped field
+
+    def test_settings_are_stored_and_replaced_whole(self):
+        entry = self.store.register_model(
+            "qwen", url="http://x", settings={"temperature": 0.7, "top_k": 20})
+        self.assertEqual(self.store.get_model(entry.id).settings,
+                         {"temperature": 0.7, "top_k": 20})
+        # None leaves them alone; a dict replaces the block; {} clears it.
+        self.store.update_model(entry.id, notes="n")
+        self.assertEqual(self.store.get_model(entry.id).settings["top_k"], 20)
+        self.store.update_model(entry.id, settings={"max_tokens": 10})
+        self.assertEqual(self.store.get_model(entry.id).settings, {"max_tokens": 10})
+        self.store.update_model(entry.id, settings={})
+        self.assertEqual(self.store.get_model(entry.id).settings, {})
+
+    def test_registration_written_before_settings_existed_still_loads(self):
+        entry = self.store.register_model("old", url="http://x")
+        path = os.path.join(self.store.model_dir(entry.id), "model.json")
+        with open(path, encoding="utf-8") as handle:
+            meta = json.load(handle)
+        del meta["settings"]
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(meta, handle)
+        self.assertEqual(self.store.get_model(entry.id).settings, {})
+        self.assertEqual(self.store.get_model(entry.id).summary()["settings"], {})
 
     def test_registry_events_are_logged(self):
         entry = self.store.register_model("Team 7B")
@@ -208,14 +235,24 @@ class TeamApi(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         os.environ["MITSS_ROOT"] = self.tmp.name
-        for key in ("MITSS_LLM_PROVIDER", "TEAM_KEY_FOR_TEST"):
+        for key in ("MITSS_LLM_PROVIDER", "TEAM_KEY_FOR_TEST", "MITSS_LLM_TIMEOUT"):
             os.environ.pop(key, None)
+        # Tests that want the probe say so; the rest exercise the run itself.
+        os.environ["MITSS_LLM_PREFLIGHT_TIMEOUT"] = "0"
+        REPLY["status"] = 200
+        REPLY["delay"] = 0
+        REPLY["body"] = json.dumps({"choices": [{"message": {"content": "stub reply"}}]})
         self.client = TestClient(app)
 
     def tearDown(self):
         os.environ.pop("MITSS_ROOT", None)
         os.environ.pop("TEAM_KEY_FOR_TEST", None)
+        os.environ.pop("MITSS_LLM_TIMEOUT", None)
+        os.environ.pop("MITSS_LLM_PREFLIGHT_TIMEOUT", None)
         self.tmp.cleanup()
+
+    def _prompt(self):
+        return self.client.post("/api/prompts", json={"name": "p", "text": "t"}).json()
 
     def _register(self, name="team-7b", **extra):
         payload = {"name": name, **extra}
@@ -267,6 +304,178 @@ class TeamApi(unittest.TestCase):
         # The endpoint was asked for the registered body-name, with its key.
         self.assertEqual(RECEIVED["body"]["model"], "team-7b-q4")
         self.assertEqual(RECEIVED["auth"], "Bearer secret-value-9")
+
+    # -- per-model settings ----------------------------------------------
+
+    def test_settings_round_trip_through_the_api(self):
+        created = self._register(url="http://127.0.0.1:9/v1", settings={
+            "temperature": 1.0, "top_p": 0.95, "top_k": 20, "max_tokens": 4096,
+            "timeout": 600, "chat_template_kwargs": {"enable_thinking": False},
+            "seed": "",  # blank box = default, dropped
+        }).json()
+        self.assertEqual(created["settings"]["top_k"], 20)
+        self.assertEqual(created["settings"]["timeout"], 600.0)
+        self.assertNotIn("seed", created["settings"])
+
+        patched = self.client.patch("/api/models/team-7b", json={
+            "settings": {"temperature": 0.2},
+        }).json()
+        self.assertEqual(patched["settings"], {"temperature": 0.2})
+        untouched = self.client.patch("/api/models/team-7b", json={"notes": "x"}).json()
+        self.assertEqual(untouched["settings"], {"temperature": 0.2})
+
+    def test_bad_settings_are_a_400_naming_the_field(self):
+        response = self._register(settings={"temperature": -1})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("temperature must be at least 0", response.json()["detail"])
+        response = self._register(name="b", settings={"timeout": "inf"})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("timeout must be a positive finite number",
+                      response.json()["detail"])
+        response = self._register(name="c", settings={"tempreture": 1})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("unknown setting", response.json()["detail"])
+
+    def test_run_records_a_snapshot_of_the_settings_it_used(self):
+        prompt = self._prompt()
+        with StubServer() as url:
+            self._register(url=url, settings={
+                "temperature": 0.6, "max_tokens": 2048,
+                "chat_template_kwargs": {"enable_thinking": False},
+            })
+            run = self.client.post("/api/generate", json={
+                "prompt_id": prompt["id"], "model_id": "team-7b",
+            }).json()
+            # The endpoint got the settings...
+            self.assertEqual(RECEIVED["body"]["temperature"], 0.6)
+            self.assertEqual(RECEIVED["body"]["max_tokens"], 2048)
+            self.assertEqual(RECEIVED["body"]["chat_template_kwargs"],
+                             {"enable_thinking": False})
+            # ...the run kept them, with the timeout that bounded the wait...
+            self.assertEqual(run["settings"]["temperature"], 0.6)
+            self.assertEqual(run["settings"]["timeout"], 120.0)
+            self.assertEqual(run["settings"]["chat_template_kwargs"],
+                             {"enable_thinking": False})
+            # ...and editing the registration afterwards changes nothing.
+            self.client.patch("/api/models/team-7b", json={"settings": {}})
+            again = self.client.get(f"/api/runs/{run['id']}").json()
+            self.assertEqual(again["settings"]["temperature"], 0.6)
+            listed = self.client.get(f"/api/runs?prompt_id={prompt['id']}").json()["runs"]
+            self.assertEqual(listed[0]["settings"]["max_tokens"], 2048)
+
+    def test_run_without_settings_still_serves_them_as_null(self):
+        prompt = self._prompt()
+        with StubServer() as url:
+            self._register(url=url)
+            run = self.client.post("/api/generate", json={
+                "prompt_id": prompt["id"], "model_id": "team-7b",
+            }).json()
+        # Defaults are still recorded - temperature 0 is a fact, not an absence.
+        self.assertEqual(run["settings"], {"temperature": 0, "timeout": 120.0})
+        pasted = self.client.post("/api/runs", json={
+            "prompt_id": prompt["id"], "model": "hand", "output": "o",
+        }).json()
+        self.assertIsNone(pasted["settings"])
+
+    # -- one status per cause --------------------------------------------
+
+    def test_timeout_is_a_504_with_its_own_message(self):
+        prompt = self._prompt()
+        REPLY["delay"] = 1.5
+        with StubServer() as url:
+            self._register(url=url, settings={"timeout": 0.3})
+            response = self.client.post("/api/generate", json={
+                "prompt_id": prompt["id"], "model_id": "team-7b",
+            })
+        self.assertEqual(response.status_code, 504)
+        self.assertIn("did not answer within 0.3s", response.json()["detail"])
+
+    def test_stuck_server_is_a_503_before_the_prompt_is_sent(self):
+        prompt = self._prompt()
+        os.environ["MITSS_LLM_PREFLIGHT_TIMEOUT"] = "0.3"
+        REPLY["delay"] = 1.5
+        with StubServer() as url:
+            self._register(url=url, settings={"timeout": 60})
+            response = self.client.post("/api/generate", json={
+                "prompt_id": prompt["id"], "model_id": "team-7b",
+            })
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("model server is stuck, restart mlx_lm.server",
+                      response.json()["detail"])
+        self.assertEqual(RECEIVED["body"]["max_tokens"], 1)   # only the probe
+        runs = self.client.get(f"/api/runs?prompt_id={prompt['id']}").json()["runs"]
+        self.assertEqual(runs, [])
+
+    def test_reasoning_is_recorded_apart_from_the_output(self):
+        prompt = self._prompt()
+        REPLY["body"] = json.dumps({"choices": [{"message": {
+            "reasoning": "First, consider the PACE plan...", "content": "The answer.",
+        }}]})
+        with StubServer() as url:
+            self._register(url=url)
+            run = self.client.post("/api/generate", json={
+                "prompt_id": prompt["id"], "model_id": "team-7b",
+            }).json()
+        self.assertEqual(run["output"], "The answer.")
+        self.assertEqual(run["reasoning"], "First, consider the PACE plan...")
+        detail = self.client.get(f"/api/runs/{run['id']}").json()
+        self.assertEqual(detail["reasoning"], "First, consider the PACE plan...")
+        listed = self.client.get(f"/api/runs?prompt_id={prompt['id']}").json()["runs"]
+        self.assertEqual(listed[0]["reasoning_characters"], 32)
+        self.assertNotIn("reasoning", listed[0])   # the list stays light
+        # On disk, beside the output, as its own file.
+        path = os.path.join(self.tmp.name, "data", "runs", run["id"], "reasoning.txt")
+        with open(path, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "First, consider the PACE plan...")
+        # A run with no reasoning has no file and an empty field.
+        REPLY["body"] = json.dumps({"choices": [{"message": {"content": "plain"}}]})
+        with StubServer() as url:
+            self._register(name="plain", url=url)
+            plain = self.client.post("/api/generate", json={
+                "prompt_id": prompt["id"], "model_id": "plain",
+            }).json()
+        self.assertEqual(plain["reasoning"], "")
+        self.assertFalse(os.path.exists(
+            os.path.join(self.tmp.name, "data", "runs", plain["id"], "reasoning.txt")))
+
+    def test_refused_connection_is_a_502_that_says_so(self):
+        prompt = self._prompt()
+        self._register(url="http://127.0.0.1:9/nowhere")
+        response = self.client.post("/api/generate", json={
+            "prompt_id": prompt["id"], "model_id": "team-7b",
+        })
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("connection refused", response.json()["detail"])
+
+    def test_model_server_error_is_a_502_quoting_the_server(self):
+        prompt = self._prompt()
+        REPLY["status"] = 500
+        REPLY["body"] = json.dumps({"error": "generation thread died"})
+        with StubServer() as url:
+            self._register(url=url)
+            response = self.client.post("/api/generate", json={
+                "prompt_id": prompt["id"], "model_id": "team-7b",
+            })
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("HTTP 500", response.json()["detail"])
+        self.assertIn("generation thread died", response.json()["detail"])
+
+    def test_bad_timeout_env_is_a_clear_500_and_llm_status_reports_it(self):
+        prompt = self._prompt()
+        os.environ["MITSS_LLM_PROVIDER"] = "http"
+        os.environ["MITSS_LLM_URL"] = "http://127.0.0.1:9/v1"
+        os.environ["MITSS_LLM_TIMEOUT"] = "nan"
+        try:
+            response = self.client.post("/api/generate", json={"prompt_id": prompt["id"]})
+            self.assertEqual(response.status_code, 500)
+            self.assertIn("MITSS_LLM_TIMEOUT must be a positive finite number",
+                          response.json()["detail"])
+            status = self.client.get("/api/llm").json()
+            self.assertFalse(status["available"])
+            self.assertIn("MITSS_LLM_TIMEOUT", status["error"])
+        finally:
+            for key in ("MITSS_LLM_PROVIDER", "MITSS_LLM_URL", "MITSS_LLM_TIMEOUT"):
+                os.environ.pop(key, None)
 
     def test_generate_on_a_paste_only_model_conflicts(self):
         prompt = self.client.post("/api/prompts", json={

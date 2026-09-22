@@ -23,6 +23,10 @@ the prompt, on which model, produced this" always has an answer.
 Backend on `http://127.0.0.1:8000`, interface on `http://127.0.0.1:5173`,
 frontend dependencies installed on first run.
 
+Running local models with mlx_lm.server? `scripts/start_model_server.sh
+[model] [port]` starts it with the standard flags (gemma-3-12b on 8080 by
+default) and refuses a port that is already taken.
+
 Manually:
 
 ```bash
@@ -265,7 +269,7 @@ cd backend && python -m unittest discover tests
 cd frontend && npm run build
 ```
 
-211 backend tests: the pipeline core (storage, immutable versioning, input
+246 backend tests: the pipeline core (storage, immutable versioning, input
 sets, prompt rendering, verdicts, diffing, the matrix, the transcript, the
 model registry, the digest), the HTTP surface, the model harness and batch
 runs — exercised against a real local server, including that an API key never

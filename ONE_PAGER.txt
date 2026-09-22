@@ -46,6 +46,12 @@ Never send an API key — if the endpoint needs one, give the NAME of an
 environment variable (key_env) and set it on the operator's machine. Keys are
 read at call time and are never stored, returned, or logged. No URL yet?
 Register anyway: the model is "paste-only" until the endpoint is up.
+The same form takes generation settings (temperature, top-p/k, max tokens,
+seed, timeout, thinking on/off). Blank = the harness default (temperature 0,
+MITSS_LLM_TIMEOUT). Every run records the settings it actually used, so a
+comparison shows whether thinking was on, and a thinking model's reasoning
+is kept beside the output (reasoning.txt, a fold on the run, a REASONING
+section in the transcript).
 
 WHAT THE BACKEND GUARANTEES
 - Prompt versions are write-once; every run freezes the template, the input,

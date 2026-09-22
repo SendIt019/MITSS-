@@ -347,13 +347,15 @@ class Store:
 
     def register_model(self, name: str, owner: str = "", url: str = "",
                        fmt: str = "openai", model: str = "", key_env: str = "",
-                       notes: str = "") -> ModelEntry:
+                       notes: str = "",
+                       settings: Optional[Dict[str, Any]] = None) -> ModelEntry:
         model_id = self.unique_model_id(name)
         created = now()
         entry = ModelEntry(
             id=model_id, name=name or model_id, owner=owner, url=url,
             format=fmt, model=model, key_env=key_env, notes=notes,
             created_at=created, updated_at=created,
+            settings=dict(settings or {}),
         )
         self._write_json(os.path.join(self.model_dir(model_id), "model.json"),
                          entry.summary())
@@ -377,17 +379,23 @@ class Store:
             notes=meta.get("notes", ""),
             created_at=meta.get("created_at", ""),
             updated_at=meta.get("updated_at", meta.get("created_at", "")),
+            # Registrations written before settings existed have no key.
+            settings=dict(meta.get("settings") or {}),
         )
 
     def update_model(self, model_id: str, owner: Optional[str] = None,
                      url: Optional[str] = None, fmt: Optional[str] = None,
                      model: Optional[str] = None, key_env: Optional[str] = None,
-                     notes: Optional[str] = None) -> ModelEntry:
+                     notes: Optional[str] = None,
+                     settings: Optional[Dict[str, Any]] = None) -> ModelEntry:
         """Connection details are editable; the name is not.
 
         Runs are labelled with the entry's name, so renaming it would detach
         every recorded run from its column in the matrix. Register a new entry
         instead.
+
+        `settings` replaces the whole settings block when given (an empty
+        dict clears it); None leaves it alone.
         """
         entry = self.get_model(model_id)
         if owner is not None:
@@ -402,6 +410,8 @@ class Store:
             entry.key_env = key_env
         if notes is not None:
             entry.notes = notes
+        if settings is not None:
+            entry.settings = dict(settings)
         entry.updated_at = now()
         self._write_json(os.path.join(self.model_dir(model_id), "model.json"),
                          entry.summary())
@@ -448,7 +458,9 @@ class Store:
     def create_run(self, prompt_id: str, version: int, model: str, output: str,
                    notes: str = "", verdict: str = UNRATED, source: str = "paste",
                    duration_ms: Optional[int] = None,
-                   input_id: str = "") -> Run:
+                   input_id: str = "",
+                   settings: Optional[Dict[str, Any]] = None,
+                   reasoning: str = "") -> Run:
         prompt = self.get_prompt(prompt_id)
         prompt_version = prompt.version(version)
         if prompt_version is None:
@@ -476,6 +488,8 @@ class Store:
             created_at=now(),
             source=source,
             duration_ms=duration_ms,
+            settings=dict(settings) if settings else None,
+            reasoning=reasoning or "",
         )
         self._persist_run(run)
         # The rolling human-readable transcript is best-effort: a failure to
@@ -499,6 +513,9 @@ class Store:
         self._write_text(os.path.join(directory, "template.txt"), run.template_text)
         self._write_text(os.path.join(directory, "input.txt"), run.input_text)
         self._write_text(os.path.join(directory, "output.txt"), run.output)
+        # Only thinking models produce this; no file means no reasoning.
+        if run.reasoning:
+            self._write_text(os.path.join(directory, "reasoning.txt"), run.reasoning)
         self._write_json(os.path.join(directory, "run.json"), run.summary())
 
     def get_run(self, run_id: str) -> Run:
@@ -514,6 +531,7 @@ class Store:
             self._read_text(os.path.join(directory, "template.txt")) or run.prompt_text
         )
         run.input_text = self._read_text(os.path.join(directory, "input.txt")) or ""
+        run.reasoning = self._read_text(os.path.join(directory, "reasoning.txt")) or ""
         return run
 
     def list_runs(self, prompt_id: Optional[str] = None,

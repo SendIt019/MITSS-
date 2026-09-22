@@ -11,7 +11,10 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-from mitss.llm import HttpProvider, LLMError, ProviderUnavailable, get_provider
+from mitss.llm import (
+    HttpProvider, LLMConfigError, LLMError, LLMStuck, LLMTimeout,
+    ProviderUnavailable, get_provider, normalize_settings,
+)
 from pipeline import (
     NotFound, Store, build_digest, build_matrix, compare_runs, diff_text,
     digest_text,
@@ -203,6 +206,16 @@ def _validate_model_fields(url: Optional[str], fmt: Optional[str],
         )
 
 
+def _clean_settings(settings: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Validate a registration's generation settings; None means untouched."""
+    if settings is None:
+        return None
+    try:
+        return normalize_settings(settings)
+    except LLMConfigError as exc:
+        raise ServiceError(f"settings: {exc}") from None
+
+
 def _model_payload(entry) -> Dict[str, Any]:
     data = entry.summary()
     # Presence only, resolved at request time. The value is never exposed.
@@ -216,13 +229,14 @@ def list_models(root: Optional[str] = None) -> List[Dict[str, Any]]:
 
 def register_model(name: str, owner: str = "", url: str = "",
                    fmt: str = "openai", model: str = "", key_env: str = "",
-                   notes: str = "", root: Optional[str] = None) -> Dict[str, Any]:
+                   notes: str = "", settings: Optional[Dict[str, Any]] = None,
+                   root: Optional[str] = None) -> Dict[str, Any]:
     if not (name or "").strip():
         raise ServiceError("the model needs a name - it is the label runs are recorded under")
     _validate_model_fields(url, fmt, key_env)
     entry = store(root).register_model(
         name.strip(), owner.strip(), url.strip(), fmt, model.strip(),
-        key_env.strip(), notes,
+        key_env.strip(), notes, _clean_settings(settings) or {},
     )
     return _model_payload(entry)
 
@@ -235,10 +249,11 @@ def update_model(model_id: str, owner: Optional[str] = None,
                  url: Optional[str] = None, fmt: Optional[str] = None,
                  model: Optional[str] = None, key_env: Optional[str] = None,
                  notes: Optional[str] = None,
+                 settings: Optional[Dict[str, Any]] = None,
                  root: Optional[str] = None) -> Dict[str, Any]:
     _validate_model_fields(url, fmt, key_env)
     entry = _found(store(root).update_model, model_id, owner, url, fmt,
-                   model, key_env, notes)
+                   model, key_env, notes, _clean_settings(settings))
     return _model_payload(entry)
 
 
@@ -315,16 +330,43 @@ def _fetch_and_record(shelf: Store, provider, label: str, ask_for: Optional[str]
     try:
         # Pass the chosen model through, so the endpoint is actually asked for
         # it rather than the run merely being labelled with it.
-        output = provider.complete(rendered, ask_for)
+        completion = provider.generate(rendered, ask_for)
     except ProviderUnavailable as exc:
         raise ServiceError(str(exc), 409) from None
+    except LLMConfigError as exc:
+        raise ServiceError(f"model configuration error: {exc}", 500) from None
+    except LLMStuck as exc:
+        # 503: the server is up but not serving. Found by the preflight, so
+        # this arrives in seconds instead of after the full timeout.
+        raise ServiceError(str(exc), 503) from None
+    except LLMTimeout as exc:
+        # 504, not 502: the server was reached but never answered. The UI
+        # tells these apart because "wait longer" and "restart it" differ.
+        raise ServiceError(str(exc), 504) from None
     except LLMError as exc:
         raise ServiceError(str(exc), 502) from None
     elapsed = int((time.monotonic() - started) * 1000)
 
-    run = shelf.create_run(prompt_id, target, label, output, source="provider",
-                           duration_ms=elapsed, input_id=input_id)
+    # The run keeps a snapshot of the settings the request carried, not a
+    # pointer to the registration, so editing the registration later cannot
+    # rewrite what an old comparison was made with.
+    run = shelf.create_run(prompt_id, target, label, completion.text,
+                           source="provider", duration_ms=elapsed,
+                           input_id=input_id, settings=completion.settings,
+                           reasoning=completion.reasoning)
     return run.to_dict()
+
+
+def _provider_for(entry) -> HttpProvider:
+    """A provider built from a registration, carrying its settings."""
+    try:
+        return HttpProvider(url=entry.url, fmt=entry.format,
+                            model=entry.model or entry.name,
+                            key_env=entry.key_env or None,
+                            settings=entry.settings)
+    except LLMConfigError as exc:
+        raise ServiceError(
+            f"'{entry.name}' has an unusable setting: {exc}", 500) from None
 
 
 def generate_run(prompt_id: str, version: Optional[int] = None, model: str = "",
@@ -353,13 +395,14 @@ def generate_run(prompt_id: str, version: Optional[int] = None, model: str = "",
                 "rendered prompt, run it through that model, and paste the "
                 "output back under its name", 409,
             )
-        provider = HttpProvider(url=entry.url, fmt=entry.format,
-                                model=entry.model or entry.name,
-                                key_env=entry.key_env or None)
+        provider = _provider_for(entry)
         return _fetch_and_record(shelf, provider, entry.name, None,
                                  prompt_id, target, rendered, input_id)
 
-    provider = get_provider()
+    try:
+        provider = get_provider()
+    except LLMConfigError as exc:
+        raise ServiceError(f"model configuration error: {exc}", 500) from None
     described = provider.describe()
     label = model or described.get("model") or provider.name
     return _fetch_and_record(shelf, provider, label, model or None,
@@ -459,7 +502,13 @@ def compare_versions(prompt_id: str, a: int, b: int,
 # --------------------------------------------------------------------------
 
 def llm_status() -> Dict[str, Any]:
-    return get_provider().describe()
+    try:
+        return get_provider().describe()
+    except LLMConfigError as exc:
+        # Say what is wrong instead of crashing the status call: a bad
+        # MITSS_LLM_TIMEOUT should read as "fix this", not as a 500 page.
+        return {"provider": os.environ.get("MITSS_LLM_PROVIDER", "manual").lower(),
+                "available": False, "models": [], "error": str(exc)}
 
 
 def digest(root: Optional[str] = None) -> Dict[str, Any]:

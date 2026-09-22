@@ -567,3 +567,151 @@ the stub echoing back which model name and auth header it actually received.
 The frontend builds clean. NOT yet verified: the restructured interface in a
 real browser — no browser was available this session; recorded as a known
 gap rather than claimed.
+
+## 2026-09-22 11:12 CDT — granite-4.0-h-tiny crash: batched generation past ~12k tokens, not the model swap
+
+Diagnosed outside the harness on port 8081 with the exact rendered prompt
+frozen in run `20260922-090636-lite-comms-plan-from-m-salute-v3` (input set
+02_cav_division_120h, 3,664 tokens). mlx 0.32.2 / mlx-lm 0.31.3 are the newest
+releases on PyPI, so an upgrade was never on the table.
+
+| case | setup | result |
+| --- | --- | --- |
+| a | `mlx_lm.generate`, max-tokens 8000 | OK, 8000 tokens at 100 tok/s, peak 7.2 GB |
+| b | server started with granite, `--max-tokens 8000` | OK, 8000 tokens in 94 s |
+| c | same, `--max-tokens 32768` | **crash**: `[metal::malloc] Resource limit (499000) exceeded` in `_generate`, a few minutes in |
+| d | server started with gemma-3-12b, one gemma request, then granite at 32768 | **crash**, same error, mid-generation |
+| e | server at 32768, request carries `max_tokens: 8000` | OK |
+| f | server at 32768, request carries `seed: 0` (non-batched path) | OK, all 32768 tokens in 357 s |
+| g | repeat of b | OK |
+| h | server at 16000 | **crash**, same error, ~2.5 min in |
+
+Reading: the error is MLX's cap on the number of live Metal buffers (499,000),
+not on bytes. Only the server's batched generator (`BatchGenerator`, used
+whenever a request has no `seed`) accumulates buffers per generated token for
+this hybrid Mamba model; a fresh or swapped server makes no difference, and
+the 8000 cap simply stops before the limit is reached. Granite's greedy
+output loops (`ASSUMED,ASSUMED,...`) so it always runs to whatever cap it is
+given, which is why raising the server cap to 32768 turned a slow run into a
+dead generation thread. After the crash the HTTP thread keeps answering, so
+every later request hangs until the client times out — the "0% GPU, no 502"
+symptom.
+
+Decision: no server flag and no upgrade. The fix is per-model settings
+(below): give granite `max_tokens: 8000` on its registration; a `seed` also
+works by forcing the non-batched path but costs the batching for everyone
+else, so it is the fallback, not the default. Root cause inside mlx-lm is not
+chased further here — it belongs upstream.
+
+## 2026-09-22 11:12 CDT — Generation settings live on the registration; every run keeps a snapshot
+
+`HttpProvider` hardcoded `temperature: 0` and sent no `max_tokens`, so a
+thinking model ran greedy (which Qwen warns can loop) to the server's cap, and
+the 502 for a 172-second qwen3.5-9b run was really a client timeout.
+
+- A registered model now carries `settings`: `temperature`, `top_p`, `top_k`,
+  `min_p`, `presence_penalty`, `max_tokens`, `seed`, `timeout`,
+  `chat_template_kwargs` (for `enable_thinking`). Every name was checked
+  against the installed `mlx_lm/server.py` (0.31.3) and is honoured there;
+  `min_p` and `presence_penalty` are included because Qwen's published
+  thinking-mode values use them. Blank means today's defaults: temperature 0,
+  no cap beyond the server's, `MITSS_LLM_TIMEOUT`. Edited on the Models tab
+  or via `settings` on `POST/PATCH /api/models`; a `PATCH` replaces the whole
+  block, `{}` clears it. Bad values are refused with the field named
+  (`temperature must be at least 0`, `unknown setting 'temprature'`).
+- Each run records the settings the request actually carried, plus the
+  client timeout, in `run.json`, in the API, and as a `settings:` line in
+  `transcript.txt` (`temperature=1.0  max_tokens=2048  enable_thinking=false
+  timeout=600s`). It is a snapshot, not a reference: editing the registration
+  later cannot rewrite what an old comparison was made with. Pasted runs and
+  runs recorded before today have `settings: null` and no transcript line;
+  old `run.json` and `model.json` files load unchanged (tested, and checked
+  against the real data directory).
+- Registrations are gitignored working data (`backend/data/models/`), so the
+  values for qwen3.5-9b are recorded here. They come from the Qwen/Qwen3.5-9B
+  model card (the local folder has no generation_config.json and only an
+  mlx-community stub README): thinking mode, general tasks —
+  `temperature 1.0, top_p 0.95, top_k 20, min_p 0.0, presence_penalty 1.5`,
+  recommended output length 32,768; non-thinking —
+  `temperature 0.7, top_p 0.8, top_k 20, min_p 0.0, presence_penalty 1.5`.
+  Thinking is on by default in the chat template and turned off per request
+  with `chat_template_kwargs: {"enable_thinking": false}`. Suggested
+  registration: the thinking-mode values, `max_tokens 32768`, `timeout 1800`.
+  For granite-4.0-h-tiny: `max_tokens 8000` (see the entry above). Not
+  applied to the live registrations by the assistant — that is data.
+- Verified live against qwen3.5-9b on port 8081 through the FastAPI app on a
+  scratch root: thinking off answered in 3.8 s, thinking on took 77.7 s for
+  the same question with the same sampling, and both snapshots landed in
+  run.json and the transcript. Note for later: mlx_lm.server returns a
+  thinking model's reasoning in a separate `reasoning` field, which the
+  harness does not record — the output is the answer only.
+
+## 2026-09-22 11:12 CDT — One error per cause: 504 timeout, 502 refused, 502 server error; timeouts validated
+
+`service.py` turned every provider failure into a 502 with whatever urllib
+said, so a timeout, a server that was not running, and a crashed generation
+thread were indistinguishable in the UI.
+
+- `LLMTimeout` → **504** "did not answer within Ns — it may still be
+  generating (raise the timeout), or mlx_lm.server may be stuck: if the GPU
+  is idle, restart it". `LLMUnreachable` → **502** "could not connect ...
+  (connection refused) — is mlx_lm.server running?". `LLMServerError` →
+  **502** "model server returned HTTP 500: <the server's own error text>",
+  quoted from the response body (never the request, which carries the key)
+  and trimmed to 200 characters. Bad configuration (`LLMConfigError`) → 500
+  naming the variable. The UI shows the message as-is in its error banner.
+- A reply with `reasoning` but no `content` (a thinking model that hit
+  max_tokens mid-think) is now "the model produced reasoning but no answer
+  (finish_reason: length)" instead of "could not find completion text".
+- `MITSS_LLM_TIMEOUT` and a registration's `timeout` must be a positive
+  finite number of seconds: `0`, negatives, `inf`, `nan`, blanks and words
+  are refused at provider construction, so `/api/llm` reports the problem
+  and generate fails before a request is sent. Previously a bad value fell
+  back silently to 120 and `0` would have meant "no wait".
+- Verified live: 504 at a 2 s timeout against qwen mid-generation, 502 for a
+  port with nothing on it, 502 quoting the server's 404 text for a model path
+  that does not exist.
+
+Gates: 236 backend tests (25 new), `compileall` clean, frontend `npm run
+build` clean. The Models tab form was verified by build and by the API it
+calls, not eyeballed in a browser.
+
+## 2026-09-22 11:12 CDT — Stuck-server detection and a start script: proposed, not built
+
+Both are designs for Jake to approve first; see the session report. The
+stuck case (HTTP thread alive, generation thread dead) is only detectable
+by asking for a token, so the proposal is a one-token preflight with a short
+deadline, and its cost is stated per run rather than hidden in a default.
+
+## 2026-09-22 11:40 CDT — Preflight probe, reasoning captured, one-command server start
+
+Jake asked for all three after the session report.
+
+- **Preflight.** Before each provider run, `HttpProvider` sends a one-token
+  request for the same model with its own deadline
+  (`MITSS_LLM_PREFLIGHT_TIMEOUT`, default 90 s, `0` disables; openai bodies
+  only). A dead generation thread now surfaces as **503** "model server is
+  stuck, restart mlx_lm.server ... (the prompt was not sent)" instead of a
+  hang. Measured against qwen3.5-9b on 8081: 0.16 s per probe when the
+  model is loaded; a swap's load time lands in the probe rather than the
+  run, which is why the deadline is 90 s and not 5. Verified live: after
+  crashing granite's generator the known way, a generate with a 1800 s
+  timeout returned 503 in 90 s.
+- **Reasoning.** mlx_lm.server returns a thinking model's chain of thought
+  as `message.reasoning`; the harness now keeps it verbatim, apart from the
+  output: `reasoning.txt` in the run folder (only when present), `reasoning`
+  on the run detail and a `reasoning_characters` count in lists, a fold on
+  the run panel, and a `REASONING:` section between PROMPT and OUTPUT in
+  the transcript. Capture-only still holds: it is recorded, not judged. A
+  reply with reasoning and no answer (the cap ran out mid-think) is now
+  recorded as a run with an empty output and the reasoning attached, rather
+  than raised as an error — the reasoning is the evidence that max_tokens
+  was too low. Verified live: a thinking-on qwen run recorded 16,948
+  characters of reasoning beside a 304-character answer.
+- **`scripts/start_model_server.sh [model] [port]`** runs caffeinate plus
+  mlx_lm.server with the standard flags (defaults gemma-3-12b, 8080,
+  `--max-tokens 32768`), refuses a missing model folder or a port already in
+  use, and takes `MITSS_MODELS_DIR`, `MITSS_MODELS_ENV`,
+  `MITSS_SERVER_MAX_TOKENS` overrides. Used for every live check above.
+
+Gates: 246 backend tests (10 new), compileall clean, frontend build clean.
