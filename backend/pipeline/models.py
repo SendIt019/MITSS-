@@ -187,6 +187,13 @@ class Run:
     # A thinking model's chain of thought, when the server returns it apart
     # from the answer. Captured verbatim like the output; never judged.
     reasoning: str = ""
+    # What the server reported: token counts, finish_reason, the model name it
+    # says it served. None when it reported nothing; never estimated.
+    usage: Optional[Dict[str, Any]] = None
+    # Fingerprint of the input text this run actually used. Inputs are
+    # editable, so two runs sharing an input_id did not necessarily see the
+    # same words - this is how you tell, without reading both.
+    input_sha256: str = ""
 
     @property
     def output_words(self) -> int:
@@ -212,6 +219,8 @@ class Run:
             "output_words": self.output_words,
             "output_characters": len(self.output),
             "reasoning_characters": len(self.reasoning),
+            "usage": self.usage,
+            "input_sha256": self.input_sha256,
         }
 
     def to_dict(self) -> Dict[str, Any]:

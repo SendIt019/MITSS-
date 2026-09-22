@@ -32,6 +32,7 @@ from mitss.llm import (
     get_provider,
     normalize_settings,
     parse_preflight_timeout,
+    redact,
     parse_timeout,
     register_provider,
 )
@@ -172,6 +173,46 @@ class Http(unittest.TestCase):
             completion = HttpProvider(url=url).generate("x")
         self.assertEqual((completion.text, completion.reasoning), ("ok", "hmm"))
 
+    # -- what the server reported -------------------------------------------
+
+    def test_usage_is_captured_exactly_as_reported(self):
+        REPLY["status"] = 200
+        REPLY["body"] = json.dumps({
+            "model": "served-model-name",
+            "choices": [{"finish_reason": "length",
+                         "message": {"content": "out"}}],
+            "usage": {"prompt_tokens": 3664, "completion_tokens": 8000,
+                      "total_tokens": 11664},
+        })
+        with StubServer() as url:
+            usage = HttpProvider(url=url, preflight=0).generate("x").usage
+        self.assertEqual(usage["prompt_tokens"], 3664)
+        self.assertEqual(usage["completion_tokens"], 8000)
+        self.assertEqual(usage["total_tokens"], 11664)
+        self.assertEqual(usage["finish_reason"], "length")
+        self.assertEqual(usage["model_reported"], "served-model-name")
+        # The provider does not invent a rate; that needs the measured time.
+        self.assertNotIn("tokens_per_second", usage)
+
+    def test_usage_is_none_when_the_server_reports_nothing(self):
+        REPLY["status"] = 200
+        REPLY["body"] = json.dumps({"completion": "just text"})
+        with StubServer() as url:
+            self.assertIsNone(HttpProvider(url=url, preflight=0).generate("x").usage)
+        REPLY["body"] = "not json at all"
+        with StubServer() as url:
+            self.assertIsNone(HttpProvider(url=url, preflight=0).generate("x").usage)
+
+    def test_partial_usage_keeps_only_what_was_reported(self):
+        REPLY["status"] = 200
+        REPLY["body"] = json.dumps({
+            "choices": [{"message": {"content": "out"}}],
+            "usage": {"completion_tokens": 12, "prompt_tokens": None},
+        })
+        with StubServer() as url:
+            usage = HttpProvider(url=url, preflight=0).generate("x").usage
+        self.assertEqual(usage, {"completion_tokens": 12})
+
     # -- preflight ----------------------------------------------------------
 
     def test_preflight_sends_a_one_token_probe_for_the_same_model_first(self):
@@ -246,6 +287,31 @@ class Http(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("401", message)
         self.assertNotIn("super-secret-value", message)
+
+    def test_a_server_that_echoes_the_key_never_leaks_it(self):
+        # Regression: error bodies are quoted back to the operator, and a
+        # server or proxy can echo the Authorization header it was sent.
+        REPLY["status"] = 401
+        REPLY["body"] = json.dumps(
+            {"error": "Invalid authorization: Bearer sk-super-secret-value-9"})
+        os.environ["MITSS_LLM_API_KEY"] = "sk-super-secret-value-9"
+        try:
+            with StubServer() as url:
+                with self.assertRaises(LLMServerError) as caught:
+                    HttpProvider(url=url, preflight=0).complete("x")
+        finally:
+            os.environ.pop("MITSS_LLM_API_KEY", None)
+        message = str(caught.exception)
+        self.assertNotIn("sk-super-secret-value-9", message)
+        self.assertIn("[REDACTED]", message)
+        self.assertIn("401", message)
+
+    def test_redact_blanks_the_value_and_the_bearer_form(self):
+        self.assertEqual(redact("saw Bearer sk-abcdef here", "sk-abcdef"),
+                         "saw [REDACTED] here")
+        self.assertEqual(redact("plain sk-abcdef", "sk-abcdef"), "plain [REDACTED]")
+        # Nothing configured, or something too short to be a credential.
+        self.assertEqual(redact("untouched", None, "", "ab"), "untouched")
 
     def test_api_key_is_sent_but_never_described(self):
         REPLY["status"] = 200

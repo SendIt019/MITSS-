@@ -438,6 +438,75 @@ class TeamApi(unittest.TestCase):
         self.assertFalse(os.path.exists(
             os.path.join(self.tmp.name, "data", "runs", plain["id"], "reasoning.txt")))
 
+    def test_run_records_what_the_server_reported_plus_a_measured_rate(self):
+        prompt = self._prompt()
+        REPLY["body"] = json.dumps({
+            "model": "served-name",
+            "choices": [{"finish_reason": "length", "message": {"content": "out"}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50,
+                      "total_tokens": 150},
+        })
+        with StubServer() as url:
+            self._register(url=url)
+            run = self.client.post("/api/generate", json={
+                "prompt_id": prompt["id"], "model_id": "team-7b",
+            }).json()
+        self.assertEqual(run["usage"]["completion_tokens"], 50)
+        self.assertEqual(run["usage"]["finish_reason"], "length")
+        self.assertEqual(run["usage"]["model_reported"], "served-name")
+        # The rate is measured here, where the elapsed time is known.
+        self.assertGreater(run["usage"]["tokens_per_second"], 0)
+        detail = self.client.get(f"/api/runs/{run['id']}").json()
+        self.assertEqual(detail["usage"]["total_tokens"], 150)
+
+    def test_a_run_with_no_reported_usage_stores_null_not_a_guess(self):
+        prompt = self._prompt()
+        REPLY["body"] = json.dumps({"choices": [{"message": {"content": "a b c"}}]})
+        with StubServer() as url:
+            self._register(url=url)
+            run = self.client.post("/api/generate", json={
+                "prompt_id": prompt["id"], "model_id": "team-7b",
+            }).json()
+        self.assertIsNone(run["usage"])
+        pasted = self.client.post("/api/runs", json={
+            "prompt_id": prompt["id"], "model": "hand", "output": "o",
+        }).json()
+        self.assertIsNone(pasted["usage"])
+
+    def test_rate_excludes_the_preflight_so_a_model_load_is_not_slowness(self):
+        # The probe is what absorbs a model swap. If its time counted toward
+        # the rate, the first model in a batch would always look slowest.
+        prompt = self._prompt()
+        os.environ["MITSS_LLM_PREFLIGHT_TIMEOUT"] = "30"
+        REPLY["delay"] = 0.4          # every request, probe included
+        REPLY["body"] = json.dumps({
+            "choices": [{"message": {"content": "out"}}],
+            "usage": {"completion_tokens": 40},
+        })
+        with StubServer() as url:
+            self._register(url=url, settings={"timeout": 60})
+            run = self.client.post("/api/generate", json={
+                "prompt_id": prompt["id"], "model_id": "team-7b",
+            }).json()
+        # Two round trips of 0.4s each were waited through...
+        self.assertGreaterEqual(run["duration_ms"], 800)
+        # ...but the rate is measured against the generation request only,
+        # so it reflects ~0.4s (=100 tok/s), not ~0.8s (=50 tok/s).
+        self.assertGreater(run["usage"]["tokens_per_second"], 60)
+
+    def test_batch_results_carry_timings(self):
+        prompt = self._prompt()
+        with StubServer() as url:
+            self._register(name="works", url=url)
+            self._register(name="broken", url="http://127.0.0.1:9/nowhere")
+            body = self.client.post("/api/batch", json={
+                "prompt_id": prompt["id"],
+            }).json()
+        by_model = {r["model"]: r for r in body["results"]}
+        # Both the success and the failure say how long they took.
+        self.assertIsInstance(by_model["works"]["elapsed_ms"], int)
+        self.assertIsInstance(by_model["broken"]["elapsed_ms"], int)
+
     def test_refused_connection_is_a_502_that_says_so(self):
         prompt = self._prompt()
         self._register(url="http://127.0.0.1:9/nowhere")

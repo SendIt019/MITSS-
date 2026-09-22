@@ -22,6 +22,7 @@ Layout:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -35,6 +36,11 @@ from .render import render_prompt
 from . import transcript
 
 INDEX_NAME = "index.jsonl"
+
+
+def text_sha256(text: str) -> str:
+    """Fingerprint of an exact text. Used to tell two inputs apart."""
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
 
 def now() -> str:
@@ -460,7 +466,8 @@ class Store:
                    duration_ms: Optional[int] = None,
                    input_id: str = "",
                    settings: Optional[Dict[str, Any]] = None,
-                   reasoning: str = "") -> Run:
+                   reasoning: str = "",
+                   usage: Optional[Dict[str, Any]] = None) -> Run:
         prompt = self.get_prompt(prompt_id)
         prompt_version = prompt.version(version)
         if prompt_version is None:
@@ -490,6 +497,8 @@ class Store:
             duration_ms=duration_ms,
             settings=dict(settings) if settings else None,
             reasoning=reasoning or "",
+            usage=dict(usage) if usage else None,
+            input_sha256=text_sha256(input_set.text) if input_set else "",
         )
         self._persist_run(run)
         # The rolling human-readable transcript is best-effort: a failure to

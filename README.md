@@ -269,7 +269,7 @@ cd backend && python -m unittest discover tests
 cd frontend && npm run build
 ```
 
-246 backend tests: the pipeline core (storage, immutable versioning, input
+The backend suite covers: the pipeline core (storage, immutable versioning, input
 sets, prompt rendering, verdicts, diffing, the matrix, the transcript, the
 model registry, the digest), the HTTP surface, the model harness and batch
 runs — exercised against a real local server, including that an API key never

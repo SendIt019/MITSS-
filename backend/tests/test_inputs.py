@@ -10,6 +10,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pipeline import NotFound, Store, build_matrix
+from pipeline.store import text_sha256
 from pipeline.models import ACCURATE, INACCURATE
 from pipeline.render import has_placeholder, preview, render_prompt
 
@@ -212,3 +213,49 @@ class MatrixWithInputs(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class InputFingerprint(unittest.TestCase):
+    """A run records the sha256 of the input text it actually used.
+
+    Inputs stay editable, so two runs sharing an input_id did not necessarily
+    see the same words. The hash is how that is told apart without reading
+    both, and it is computed at run time from the frozen text.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(self.tmp.name)
+        self.prompt = self.store.create_prompt("p", "Summarise: {input}")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_editing_an_input_changes_the_hash_of_later_runs_only(self):
+        material = self.store.create_input("cav", "Revision A text")
+        first = self.store.create_run(self.prompt.id, 1, "qwen", "out",
+                                      input_id=material.id)
+        self.store.update_input(material.id, text="Revision B text")
+        second = self.store.create_run(self.prompt.id, 1, "gemma", "out",
+                                       input_id=material.id)
+
+        self.assertEqual(first.input_sha256, text_sha256("Revision A text"))
+        self.assertEqual(second.input_sha256, text_sha256("Revision B text"))
+        self.assertNotEqual(first.input_sha256, second.input_sha256)
+        # Same input_id, so the matrix would pair them; the hashes say not to.
+        self.assertEqual(first.input_id, second.input_id)
+        # The older run still reports the text it actually used.
+        self.assertEqual(self.store.get_run(first.id).input_text, "Revision A text")
+        self.assertEqual(self.store.get_run(first.id).input_sha256,
+                         first.input_sha256)
+
+    def test_a_run_with_no_input_has_no_hash(self):
+        run = self.store.create_run(self.prompt.id, 1, "qwen", "out")
+        self.assertEqual(run.input_sha256, "")
+
+    def test_same_text_in_two_inputs_hashes_the_same(self):
+        a = self.store.create_input("one", "identical")
+        b = self.store.create_input("two", "identical")
+        run_a = self.store.create_run(self.prompt.id, 1, "m", "o", input_id=a.id)
+        run_b = self.store.create_run(self.prompt.id, 1, "m", "o", input_id=b.id)
+        self.assertEqual(run_a.input_sha256, run_b.input_sha256)

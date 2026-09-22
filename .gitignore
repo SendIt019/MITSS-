@@ -20,8 +20,14 @@ dist/
 *.log
 
 # Local model configuration. Never commit credentials.
+# The wildcard covers backups like .env.bak-2026-09-21: a copy of a working
+# .env is the usual way a key reaches git history by accident.
 .env
+.env.*
 backend/.env
+backend/.env.*
+!.env.example
+!backend/.env.example
 
 # Editor and OS noise
 .DS_Store

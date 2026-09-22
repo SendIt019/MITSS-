@@ -90,7 +90,8 @@ backend/pipeline/   The product: prompts, versions, inputs, runs, matrix, diffin
 backend/mitss/      The model provider harness, plus a scheduling example kept
                     from an earlier design. The pipeline does not depend on the
                     scheduling parts.
-backend/tests/      unittest. 246 tests.
+backend/tests/      unittest. Run them all; do not quote a count here,
+                    it drifts every session.
 ```
 
 ## The team layer (added 2026-08-31)

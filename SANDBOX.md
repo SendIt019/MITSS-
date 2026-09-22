@@ -12,6 +12,12 @@ key is set.
 
 ## Environment variables
 
+MITSS is built for one operator on one machine. The backend binds localhost,
+holds no authentication, and will call whatever URL a model registration
+names — which is the point on a laptop, and a liability anywhere else. Do not
+expose port 8000 to a LAN, a VPN or the internet without putting
+authentication and an endpoint allowlist in front of it first.
+
 Set these in `backend/.env`, then restart `./dev.sh`.
 
 | Variable | Required | Purpose |

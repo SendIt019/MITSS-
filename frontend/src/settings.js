@@ -62,3 +62,18 @@ export function describeSettings(settings) {
   }
   return parts.join('  ')
 }
+
+// What the model server reported about a run: token counts, why it stopped,
+// how fast it went. Never estimated — a missing number stays missing.
+export function describeUsage(usage) {
+  if (!usage) return ''
+  const parts = []
+  const { prompt_tokens: inTok, completion_tokens: outTok } = usage
+  if (inTok !== undefined || outTok !== undefined) {
+    parts.push(`${inTok ?? '?'} in / ${outTok ?? '?'} out tokens`)
+  }
+  if (usage.tokens_per_second !== undefined) parts.push(`${usage.tokens_per_second} tok/s`)
+  if (usage.finish_reason) parts.push(`stopped: ${usage.finish_reason}`)
+  if (usage.model_reported) parts.push(`server said: ${usage.model_reported}`)
+  return parts.join('  ·  ')
+}

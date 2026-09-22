@@ -38,6 +38,7 @@ import json
 import math
 import os
 import socket
+import time
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
@@ -198,6 +199,23 @@ def describe_settings(settings: Optional[Dict[str, Any]]) -> str:
     return "  ".join(parts)
 
 
+def redact(text: str, *secrets: Optional[str]) -> str:
+    """Blank out credential values anywhere in text.
+
+    Provider error bodies are quoted back to the operator, and a server or
+    proxy may echo the Authorization header it received ("Invalid
+    authorization: Bearer sk-..."). Everything derived from a response goes
+    through here before it is raised, logged, stored or returned.
+    """
+    for secret in secrets:
+        if secret and len(secret) >= 4:
+            # The header form first: replacing the bare value first would
+            # leave a dangling "Bearer" behind.
+            text = text.replace(f"Bearer {secret}", "[REDACTED]")
+            text = text.replace(secret, "[REDACTED]")
+    return text
+
+
 @dataclass
 class Completion:
     """What came back, plus exactly which settings the request carried.
@@ -210,6 +228,14 @@ class Completion:
     text: str
     settings: Dict[str, Any] = field(default_factory=dict)
     reasoning: str = ""
+    # What the server reported about the work: token counts, why it stopped,
+    # which model it says it used. None when the server reports nothing -
+    # never estimated from words or characters.
+    usage: Optional[Dict[str, Any]] = None
+    # Seconds spent on the generation request alone, with the preflight probe
+    # (and any model load it absorbed) excluded. This is what a throughput
+    # figure must be measured against, or swapping models would look slow.
+    request_seconds: float = 0.0
 
 
 # --------------------------------------------------------------------------
@@ -411,9 +437,11 @@ class HttpProvider(LLMProvider):
         if self.format == "openai" and self.preflight_timeout > 0:
             self._preflight(chosen)
 
+        started = time.monotonic()
         payload = self._post(body, self.timeout)
+        request_seconds = time.monotonic() - started
         text, reasoning = self._parse(payload)
-        return Completion(text, used, reasoning)
+        return Completion(text, used, reasoning, _usage(payload), request_seconds)
 
     def _preflight(self, chosen: str) -> None:
         """Ask for one token before the real run.
@@ -450,10 +478,11 @@ class HttpProvider(LLMProvider):
                 return response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             # Deliberately does not echo the request, which carries the key.
-            # The server's own error text is safe and usually says why.
+            # The server's own error text usually says why - but a server can
+            # echo the Authorization header it was sent, so redact first.
+            said = redact(_server_said(exc), os.environ.get(self.key_env))
             raise LLMServerError(
-                f"model server returned HTTP {exc.code}{_server_said(exc)}",
-                exc.code,
+                f"model server returned HTTP {exc.code}{said}", exc.code,
             ) from None
         except urllib.error.URLError as exc:
             reason = exc.reason
@@ -545,6 +574,39 @@ class HttpProvider(LLMProvider):
             "could not find completion text in the model response; expected an "
             "openai-style 'choices' array or a completion/response/output/text key"
         )
+
+
+def _usage(payload: str) -> Optional[Dict[str, Any]]:
+    """Token counts and stop reason, exactly as the server reported them.
+
+    Returns None when the server says nothing. Counts are never inferred from
+    the text: a missing number stays missing, so a comparison is never made
+    against a guess.
+    """
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    out: Dict[str, Any] = {}
+    reported = data.get("usage")
+    if isinstance(reported, dict):
+        for name in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = reported.get(name)
+            if isinstance(value, int) and not isinstance(value, bool):
+                out[name] = value
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        reason = choices[0].get("finish_reason")
+        if isinstance(reason, str) and reason:
+            out["finish_reason"] = reason
+    # What the server says it ran, which can differ from what we asked for.
+    served = data.get("model")
+    if isinstance(served, str) and served:
+        out["model_reported"] = served
+    return out or None
 
 
 def _server_said(exc: urllib.error.HTTPError, limit: int = 200) -> str:

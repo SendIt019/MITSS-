@@ -52,6 +52,26 @@ def format_settings(settings) -> str:
     return "  ".join(parts)
 
 
+def format_usage(usage) -> str:
+    """`3664 in / 8000 out tokens  |  83.0 tok/s  |  stopped: length`."""
+    if not usage:
+        return ""
+    parts = []
+    prompt_tokens = usage.get("prompt_tokens")
+    completion_tokens = usage.get("completion_tokens")
+    if prompt_tokens is not None or completion_tokens is not None:
+        parts.append(f"{prompt_tokens if prompt_tokens is not None else '?'} in / "
+                     f"{completion_tokens if completion_tokens is not None else '?'}"
+                     " out tokens")
+    if usage.get("tokens_per_second") is not None:
+        parts.append(f"{usage['tokens_per_second']} tok/s")
+    if usage.get("finish_reason"):
+        parts.append(f"stopped: {usage['finish_reason']}")
+    if usage.get("model_reported"):
+        parts.append(f"server said: {usage['model_reported']}")
+    return "  |  ".join(parts)
+
+
 def format_run(run) -> str:
     """The block written when an output is recorded."""
     duration = f"  |  {run.duration_ms}ms" if run.duration_ms else ""
@@ -67,6 +87,9 @@ def format_run(run) -> str:
     # and older blocks in the same file simply lack the line.
     if settings:
         lines.append(f"settings: {format_settings(settings)}")
+    usage = getattr(run, "usage", None)
+    if usage:
+        lines.append(f"usage: {format_usage(usage)}")
     lines += [
         LIGHT,
         "PROMPT:",

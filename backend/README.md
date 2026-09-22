@@ -1,25 +1,34 @@
 # MITSS backend
 
-FastAPI application over the dependency-free `mitss` core.
+FastAPI application over a dependency-free core. Nothing below `app/` imports
+a third-party package, and nothing below `pipeline/` touches the network.
 
 ```
 app/       HTTP layer (FastAPI) — routes and request models only
   main.py    routes, CORS, error translation
   service.py business logic; knows nothing about FastAPI
-mitss/     the core: no third-party dependencies, no network access
-  model.py       dataclasses for plans and schedules
-  textplan.py    the plain-text grammar parser
-  validate.py    structural validation
-  constraints.py hard-constraint checking
-  capture.py     pulls JSON out of a messy model reply
-  packet.py      builds the scheduling and structuring packets
-  llm.py         provider interface for a custom model
-  render.py      table, CSV and ASCII timeline
-  diffing.py     run-to-run comparison
-  runlog.py      run storage and the append-only index
-  cli.py         command line interface
+pipeline/  the product: prompts, inputs, runs, verdicts, comparison
+  models.py      dataclasses for prompts, versions, inputs, runs, registrations
+  store.py       filesystem storage and the append-only event index
+  render.py      substitutes an input into a prompt template
+  compare.py     the version-by-model matrix and run-to-run diffs
+  digest.py      verdicts rolled up by prompt, version and model
+  transcript.py  the rolling plain-text log of every run
+mitss/     the model harness, plus a worked scheduling example
+  llm.py         provider interface — used by app/service.py, this is live
+  model.py       dataclasses for plans and schedules       \
+  textplan.py    the plain-text grammar parser              |
+  validate.py    structural validation                      |
+  constraints.py hard-constraint checking                   | the scheduling
+  capture.py     pulls JSON out of a messy model reply      | example; the
+  packet.py      builds the scheduling packets              | pipeline does
+  render.py      table, CSV and ASCII timeline              | not depend on
+  diffing.py     run-to-run comparison                      | any of it
+  runlog.py      run storage and the append-only index      |
+  cli.py         command line interface                    /
+data/      prompts, inputs, runs, registrations, transcript (gitignored)
 inputs/    plans written by hand for the command line
-runs/      one folder per run (gitignored)
+runs/      the scheduling example's own run folder (gitignored)
 tests/     unit and API tests
 ```
 

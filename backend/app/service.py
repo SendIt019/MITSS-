@@ -345,7 +345,8 @@ def _fetch_and_record(shelf: Store, provider, label: str, ask_for: Optional[str]
         raise ServiceError(str(exc), 504) from None
     except LLMError as exc:
         raise ServiceError(str(exc), 502) from None
-    elapsed = int((time.monotonic() - started) * 1000)
+    seconds = time.monotonic() - started
+    elapsed = int(seconds * 1000)
 
     # The run keeps a snapshot of the settings the request carried, not a
     # pointer to the registration, so editing the registration later cannot
@@ -353,8 +354,32 @@ def _fetch_and_record(shelf: Store, provider, label: str, ask_for: Optional[str]
     run = shelf.create_run(prompt_id, target, label, completion.text,
                            source="provider", duration_ms=elapsed,
                            input_id=input_id, settings=completion.settings,
-                           reasoning=completion.reasoning)
+                           reasoning=completion.reasoning,
+                           usage=_with_rate(completion.usage,
+                                            completion.request_seconds or seconds))
     return run.to_dict()
+
+
+def _with_rate(usage: Optional[Dict[str, Any]],
+               seconds: float) -> Optional[Dict[str, Any]]:
+    """Add tokens per second, but only when the server gave a real count.
+
+    A rate inferred from word counts would look like a measurement and be
+    wrong, so a missing count simply stays missing.
+
+    `seconds` is the generation request alone, excluding the preflight probe,
+    so a model that had to be loaded is not reported as a slow one. It still
+    includes the server's prompt processing, which is honest: it is the
+    throughput the operator actually waited through.
+    """
+    if not usage:
+        return usage
+    produced = usage.get("completion_tokens")
+    if isinstance(produced, int) and produced > 0 and seconds > 0:
+        enriched = dict(usage)
+        enriched["tokens_per_second"] = round(produced / seconds, 1)
+        return enriched
+    return usage
 
 
 def _provider_for(entry) -> HttpProvider:
@@ -430,15 +455,28 @@ def batch_generate(prompt_id: str, version: Optional[int] = None,
         )
 
     results = []
-    for entry in entries:
+    total = len(entries)
+    for position, entry in enumerate(entries, start=1):
+        # A batch is one HTTP request that can run for many minutes, so the
+        # backend log is the only place the operator can watch it progress.
+        print(f"[batch {position}/{total}] {entry.name}: asking...", flush=True)
+        started = time.monotonic()
         try:
             run = generate_run(prompt_id, version, input_id=input_id,
                                model_id=entry.id, root=root)
+            elapsed = int((time.monotonic() - started) * 1000)
             results.append({"model_id": entry.id, "model": entry.name,
-                            "ok": True, "run_id": run["id"]})
+                            "ok": True, "run_id": run["id"],
+                            "elapsed_ms": elapsed, "usage": run.get("usage")})
+            print(f"[batch {position}/{total}] {entry.name}: recorded in "
+                  f"{elapsed / 1000:.1f}s", flush=True)
         except ServiceError as exc:
+            elapsed = int((time.monotonic() - started) * 1000)
             results.append({"model_id": entry.id, "model": entry.name,
-                            "ok": False, "error": exc.message})
+                            "ok": False, "error": exc.message,
+                            "elapsed_ms": elapsed})
+            print(f"[batch {position}/{total}] {entry.name}: FAILED after "
+                  f"{elapsed / 1000:.1f}s - {exc.message}", flush=True)
     return {
         "results": results,
         "recorded": sum(1 for r in results if r["ok"]),

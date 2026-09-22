@@ -4,4 +4,7 @@ uvicorn[standard]>=0.27
 python-multipart>=0.0.9
 
 # Only the API tests need this (starlette's TestClient transport).
+# httpx2 is deliberate, not a typo for httpx: starlette 1.6 does
+# `import httpx2 as httpx` first and only falls back to httpx. It is the
+# Pydantic team's successor to httpx, by the same author.
 httpx2>=2

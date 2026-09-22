@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
-import { describeSettings } from './settings'
+import { describeSettings, describeUsage } from './settings'
 import DiffText, { DiffLegend } from './components/DiffText'
 import Digest from './components/Digest'
 import Inputs from './components/Inputs'
@@ -288,7 +288,8 @@ export default function App() {
       const body = await api.batch(prompt.id, viewVersion, inputId)
       await refreshCurrent()
       setTab('runs')
-      say(`Batch finished — ${body.recorded} recorded` +
+      const seconds = body.results.reduce((sum, r) => sum + (r.elapsed_ms || 0), 0) / 1000
+      say(`Batch finished in ${Math.round(seconds)}s — ${body.recorded} recorded` +
           (body.failed ? `, ${body.failed} failed: ` +
             body.results.filter((r) => !r.ok).map((r) => r.model).join(', ') : ''))
     })
@@ -592,7 +593,12 @@ export default function App() {
                             </button>
                             {callableModels.length > 1 && (
                               <button onClick={onBatch} disabled={busy || dirty}
-                                      title="One click: this version and input against every registered model">
+                                      title={'This version and input against every registered model, '
+                                        + 'one after another — not in parallel. Each model is asked in '
+                                        + 'turn and a local server loads one at a time, so allow several '
+                                        + 'minutes per model and leave the page open. '
+                                        + 'One model failing does not stop the rest; '
+                                        + 'progress is printed to the backend terminal.'}>
                                 Run all {callableModels.length}
                               </button>
                             )}
@@ -751,6 +757,15 @@ function RunsTab({ runs, openRun, onOpenRun, onReview, onDelete, busy, runLabel 
           {openRun.settings && (
             <p className="hint" style={{ marginTop: 0 }}>
               Settings: <span className="mono">{describeSettings(openRun.settings)}</span>
+            </p>
+          )}
+          {openRun.usage && (
+            <p className="hint" style={{ marginTop: 0 }}>
+              Reported: <span className="mono">{describeUsage(openRun.usage)}</span>
+              {openRun.usage.finish_reason === 'length' && (
+                <span className="muted"> — it stopped at the token cap, so the
+                  answer is probably cut off; raise max tokens for this model.</span>
+              )}
             </p>
           )}
 

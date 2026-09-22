@@ -715,3 +715,92 @@ Jake asked for all three after the session report.
   `MITSS_SERVER_MAX_TOKENS` overrides. Used for every live check above.
 
 Gates: 246 backend tests (10 new), compileall clean, frontend build clean.
+
+## 2026-09-22 12:30 CDT — Two external reviews: what was taken, what was refused
+
+Reviewed `CLAUDE_CODE_MITSS_REVIEW.md` and
+`MITSS_Code_Architecture_Review_Claude_Code.md`. Every finding was checked
+against the code before anything changed; several did not survive that check.
+
+**Taken.**
+
+- **Secret redaction (CONFIRMED, and a regression from this morning).** The
+  `_server_said` helper added earlier today quotes the model server's error
+  body back to the operator. A server or proxy that echoes the
+  `Authorization` header it received — "Invalid authorization: Bearer sk-…" —
+  therefore put the key in the API response, the UI banner and the backend
+  log. Reproduced with a stub that echoes the header. There is now one
+  `redact()` in `mitss/llm.py`, applied to the quoted body before it is
+  raised, and a regression test with a deliberately echoing server. The older
+  test only proved the *request* was not echoed, which is why this got
+  through.
+- **Provider telemetry.** Runs now keep `usage` exactly as the server
+  reported it: `prompt_tokens`, `completion_tokens`, `total_tokens`,
+  `finish_reason`, `model_reported`, plus a measured `tokens_per_second`.
+  Nothing is estimated — a server that reports no counts stores `usage: null`
+  rather than a guess from word counts. `finish_reason: length` is surfaced
+  in the UI with a note that the answer is probably truncated, which is
+  exactly the granite failure mode from this morning. The rate is measured
+  against the generation request alone, excluding the preflight probe, so a
+  model that had to be loaded is not recorded as a slow one.
+- **Input fingerprint.** Every run stores `input_sha256` of the text it
+  actually used. Inputs stay editable by design, so two runs sharing an
+  `input_id` are not necessarily like-for-like; the hash is how that is told
+  apart without reading both. This is the cheap half of the review's
+  "version the inputs" proposal and it needs no migration — old runs simply
+  have an empty hash.
+- **Batch observability.** `batch_generate` prints one line per model to the
+  backend terminal (`[batch 3/12] qwen3-14b: recorded in 94.2s`) and each
+  result carries `elapsed_ms`; the UI flash reports the total. A batch is a
+  single HTTP request that can run for an hour, and it was silent.
+- **`.gitignore` hardening.** `backend/.env.*` with `!backend/.env.example`.
+  No env file other than the example is or ever was in git history (checked
+  with `git log --all --diff-filter=A`), so the review's "remove tracked
+  backup files" is not the situation here — but one `cp .env .env.bak` away
+  from being it.
+- **Documentation.** `backend/README.md` described `mitss/` as "the core" and
+  never mentioned `pipeline/`, which is the actual product; corrected.
+  `.env.example` said `MITSS_LLM_TIMEOUT=120`, which cuts a local 20B+ run
+  off and looks like a model failure; now 900 with a note. Hardcoded test
+  counts removed from `CLAUDE.md` and `README.md` rather than updated again.
+  `SANDBOX.md` now states the trust boundary plainly: one operator, one
+  machine, no authentication, and the backend will call whatever URL a
+  registration names.
+
+**Refused, with reasons.**
+
+- **`httpx2>=2` is not a typo.** The review called it P0 and wanted
+  `httpx>=0.27`. `httpx2` is the Pydantic team's successor to httpx by the
+  same author, and starlette 1.6 does `import httpx2 as httpx` first,
+  falling back to `httpx` only if it is missing. Proved by building a clean
+  virtualenv from `requirements.txt` alone: httpx2 2.13.0 installs, httpx is
+  absent, `TestClient` imports, and the whole suite passes. Changing it would
+  have been a downgrade. A comment now says so, so the next reviewer does not
+  re-raise it.
+- **Full input versioning.** The stated problem is real; the sha256 above
+  answers it for a fraction of the cost. Revisioned inputs would touch the
+  store, the API, the matrix and the UI, and would need a migration for
+  existing data. Worth doing deliberately, not as a side effect of a review.
+- **Configuration fingerprint.** The settings snapshot plus `input_sha256`
+  already contain everything a fingerprint would hash, so it would be a
+  convenience field with no consumer until the matrix warns on mixed cells.
+  Add it with that warning, or not at all.
+- **Deterministic output validators.** `CLAUDE.md` says capture-only: no
+  automated scoring or schema checks on model output unless Jake asks for
+  them. The review's own "keep the human verdict separate" is the right
+  design *if* this is ever wanted, but it is his call, not a reviewer's.
+- **Batch skip-heavy / pause-between-models.** The premise is that the local
+  server keeps the previous model resident on a 24 GB machine. mlx_lm.server
+  does not: `ModelProvider._load` clears `self.model` before loading the next
+  one ("Remove the old model if it exists"), so models swap rather than
+  accumulate. `POST /api/batch` already accepts `model_ids`, so "run all the
+  small ones" is available today without a new mechanism. The first review
+  was written against an LM Studio configuration at port 1234, which is not
+  the current setup.
+- **Parallel execution, atomic writes, SQLite, a single version source.**
+  Single-user localhost; the reviews agree these are premature. Sequential
+  batch stays.
+
+Gates: 260 backend tests, compileall clean, frontend build clean, and the
+suite also passes in a clean virtualenv built only from `requirements.txt`.
+Telemetry and the input hash verified live against qwen3.5-9b on port 8081.

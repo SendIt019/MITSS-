@@ -73,6 +73,20 @@ class Transcript(unittest.TestCase):
         self.store.create_run(self.prompt.id, 1, "hand", "out")
         self.assertEqual(self.text().count("REASONING:"), 1)
 
+    def test_reported_usage_appears_on_its_own_line(self):
+        self.store.create_run(self.prompt.id, 1, "granite", "out",
+                              source="provider",
+                              usage={"prompt_tokens": 3664, "completion_tokens": 8000,
+                                     "total_tokens": 11664, "tokens_per_second": 83.0,
+                                     "finish_reason": "length"})
+        body = self.text()
+        self.assertIn("usage: 3664 in / 8000 out tokens  |  83.0 tok/s  |  "
+                      "stopped: length", body)
+
+    def test_runs_without_usage_have_no_usage_line(self):
+        self.store.create_run(self.prompt.id, 1, "hand", "out")
+        self.assertNotIn("usage:", self.text())
+
     def test_pasted_runs_have_no_settings_line(self):
         self.store.create_run(self.prompt.id, 1, "hand", "out")
         self.assertNotIn("settings:", self.text())
