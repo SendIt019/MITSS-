@@ -1119,3 +1119,60 @@ index-only check would miss it, and resume would record the cell again.
 
 The `started` lines and the two-stage Ctrl-C from 12:42 stand. Spec §5.4 and
 §7 were updated.
+
+## 2026-09-29T13:27:01-05:00 — Matrix runner Step 1: registrations, check, plan
+
+`backend/run_matrix.py` has `check` and `plan`, with 40 tests in
+`backend/tests/test_run_matrix.py`. `scripts/run_matrix.sh` is the wrapper
+decided at Step 0. `run`, `resume` and `status` come in Step 2.
+
+- **Thinking off, from the chat templates (read-only).** Qwen 3.8 thinks
+  unless `enable_thinking` is exactly `false`. With it undefined, the template
+  adds reasoning instructions at "xhigh" effort and opens `<think>`
+  (`chat_template.jinja:46, 165`). Gemma 4 is off unless `enable_thinking` is
+  true, and `false` changes nothing (`chat_template.jinja:179-183, 359`).
+  Llama 3.1's template has no switch, so the key is ignored. All three
+  registrations therefore carry `chat_template_kwargs: {"enable_thinking":
+  false}`, which is required for Qwen and harmless for the others.
+- **Settings for all three:** temperature 0.2, max_tokens 1024, timeout 120
+  (idle seconds), thinking off, as suggested in the spec. Printed for Jake,
+  not applied. The payloads were checked by posting them to the real API
+  against a scratch `MITSS_ROOT`. They give ids `qwen3-8-27b` and
+  `gemma-4-26b-a4b`, and the settings come back as sent. The real registry
+  was not touched.
+- **Metal limit call** (confirmed with mlx 0.32.3 in `~/models-env`):
+  `mx.device_info()['max_recommended_working_set_size']`, falling back to
+  `mx.metal.device_info()`. It reads 19,069,665,280 bytes (17.8 GiB) on
+  Jake's 24 GB Mac, where `iogpu.wired_limit_mb` is 0. The Python path uses
+  `MITSS_MODELS_ENV`, the variable `start_model_server.sh` already reads.
+- **Memory rule details the spec left open:** without a readable limit, the
+  fallback is two-thirds of RAM up to 36 GB and three-quarters above. The
+  suggested limit is 20480 MB, or the next whole GiB above weights plus 2 GB
+  when that is more. A limit that would leave macOS under 4 GiB is never
+  suggested; the model is reported as not fitting. Units are binary (GiB,
+  MiB), matching `iogpu.wired_limit_mb`.
+- **check** covers the lineup by default, with `--models` for other
+  registrations. It exits 3 on a problem (not registered, quarantined,
+  paste-only, missing folder, server not listening). Memory, low disk (under
+  1 GiB) and the notification are warnings. The server probe is a TCP connect
+  to local endpoints only; remote endpoints are not probed.
+- **plan** takes `--models` like `run`. The estimate uses the median rate and
+  output length of the model's last 10 runs that report a real
+  `tokens_per_second`, with output capped at its `max_tokens`. Loading time is
+  not included.
+- **Usage errors exit 3, not argparse's 2.** 2 means "stopped early" here.
+- **Wrapper:** it overrides any `MITSS_LLM_PREFLIGHT_TIMEOUT` from `.env`
+  with `MITSS_MATRIX_PREFLIGHT_TIMEOUT`, or 300, as decided at Step 0. It
+  runs `python3` from `PATH`, as `dev.sh` does with the venv active.
+- **ruff:** 64 findings on the two new files. 63 are UP006, UP045 and UP035
+  (`List` and `Optional` from `typing`). They are left as they are to match
+  the rest of the backend, which has the same findings (120 in `service.py`
+  alone). The other is I001 on the wrapped `mitss.llm` import, the repo's
+  usual layout, the same as the I001 left in `tests/test_llm.py`. The five
+  other findings were fixed.
+
+Step 2 notes from Jake, recorded in the spec: resume compares `created_at`
+and the `started` time at whole-second precision in the same time zone (both
+from `store.now()`, local time to the second). The Step 4 known-limits list
+must say that a manual run of the same cell made while a matrix is
+interrupted could be adopted by resume.
