@@ -1424,3 +1424,64 @@ Codex approved Step 4 with no findings (`docs/runner/reviews/step-4-round-1.md`)
 Its sandbox could not run the suite; the gates were run outside it before the
 Step 4 commit and all passed. The matrix runner build (Steps 0 to 4) is complete
 on `feat/matrix-runner`.
+
+## 2026-09-29T15:47:00-05:00 — Mermaid diagrams in the run panel
+
+Jake asked for ```` ```mermaid ```` blocks in a run's output to be drawn as
+diagrams below the output text, on `feat/mermaid-review` (from
+`feat/matrix-runner`), run end to end by Claude Code with judgment calls
+logged here. Brief: `docs/mermaid/SPEC.md`. Front end only; no backend change.
+`.claude/rules/runner.md`'s "no front-end changes in v1" is scoped to the
+matrix runner and does not apply to this separate feature.
+
+- **Where.** The open run's panel on the Outputs tab only, under "Output" and
+  above the reasoning and prompt folds. Not in Compare, where the word diff is
+  the point, and not in reasoning or the prompt.
+- **Finding blocks** (`frontend/src/mermaidBlocks.js`). CommonMark fences:
+  backticks or tildes, up to three spaces of indent, closed by the same
+  character at least as long. Every fence is tracked, so a mermaid fence
+  quoted inside another code block is not drawn. A block with no closing
+  fence runs to the end, as CommonMark does, and the panel says the output may
+  have been cut off; it usually fails to parse and shows its code.
+- **Two layers against untrusted output.** Mermaid runs `securityLevel:
+  "strict"` and `htmlLabels`, `fontFamily`, `themeCSS` and `dompurifyConfig`
+  join its `secure` list, so a `%%{init}%%` directive in the output cannot
+  change them (Mermaid strips secure keys recursively, checked in its
+  source). And the SVG is never inserted into the page: it is shown as an
+  `<img>` from a `data:` URL, where an SVG cannot run script, follow links or
+  fetch. Cost: diagram text cannot be selected. Checked with an output that
+  tried `<img onerror>`, `<script>`, `click` callbacks, a `javascript:` link
+  and a directive setting `securityLevel: loose`: nothing ran, the labels
+  showed as text.
+- **Labels are plain SVG text** (`htmlLabels: false`). HTML labels live in
+  `<foreignObject>`, which taints a canvas and would make Save PNG fail.
+- **Save PNG** draws the image onto a white canvas at 2× and downloads
+  `<run id>-diagram-<n>.png`. If the browser refuses, the error shows beside
+  the button. Diagrams sit on white in the panel too, so what you see is what
+  you save.
+- **Loaded on first use.** `mermaid` is imported dynamically, so Vite splits
+  it into its own chunks and outputs without a diagram never download it (the
+  main chunk is 189 kB). The build prints a >500 kB warning for Mermaid's own
+  lazy chunks; left as is. The bundle references no external URL other than
+  documentation strings, and the browser check below blocked all non-local
+  requests.
+- **Failures never break the panel.** Parse and render errors show Mermaid's
+  message and the raw code in the block's place; a failed library load does
+  the same; an error boundary per diagram catches anything else. Diagrams
+  render one at a time because Mermaid keeps global state.
+- **Frontend test.** `npm test` runs `frontend/tests/mermaidBlocks.test.js`
+  on Node's built-in runner, with no new dev dependency.
+- **npm audit** reports 2 issues in `vite`/`esbuild` (the dev server). They
+  predate this change and need a breaking Vite upgrade; not touched here.
+- **Verified, per "verify, do not assert".** A scratch backend
+  (`MITSS_ROOT` in the session scratchpad, port 8010) with six recorded runs
+  (none, valid, invalid, three blocks with the middle one broken, hostile,
+  unclosed), served by `vite preview` of the production build and driven
+  in Chrome by Playwright. Results: no-Mermaid run renders no diagram section
+  and does not load the Mermaid chunk; valid draws one diagram; invalid and
+  unclosed show the parse error and raw code; the mixed run shows
+  drawn, failed, drawn in that order; Save PNG produced a real 440×888 PNG;
+  no console errors, no dialogs, no external requests, no stray Mermaid
+  nodes left in the page. The no-Mermaid run's panel was also screenshotted
+  against a build of `feat/matrix-runner`: pixel-identical, and identical
+  HTML.

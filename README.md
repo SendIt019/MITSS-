@@ -109,6 +109,24 @@ Removed text is struck through and added text is underlined, so the comparison
 survives greyscale printing and colour-vision deficiency rather than depending
 on the red and green.
 
+## Diagrams in outputs
+
+When a recorded output contains fenced `` ```mermaid `` blocks, the run panel
+(Outputs tab, open a run) draws each one as a diagram under the output text,
+in the order they appear. The output text itself is unchanged above them.
+
+- A block that does not parse shows Mermaid's parse error and the raw code in
+  its place. A block with no closing fence (an answer cut off at the token
+  cap) says so.
+- **Save PNG** under each diagram downloads it at twice its on-screen size,
+  on a white background, named `<run id>-diagram-<n>.png`.
+- Outputs with no Mermaid block look exactly as they did before; the Mermaid
+  library is not even downloaded for them.
+- Model output is untrusted. Mermaid runs with `securityLevel: "strict"`, a
+  `%%{init}%%` directive in the output cannot change that, and the drawing is
+  shown as an image, so nothing in it can run script or fetch anything.
+- Mermaid is an npm dependency bundled by Vite, so this works offline.
+
 ## Plugging in your model
 
 The default provider is `manual`: MITSS gives you a prompt and takes an output,
@@ -444,7 +462,7 @@ The pipeline itself knows nothing about scheduling. See
 
 ```bash
 cd backend && python -m unittest discover tests
-cd frontend && npm run build
+cd frontend && npm test && npm run build
 ```
 
 The backend suite covers: the pipeline core (storage, immutable versioning, input
@@ -454,6 +472,9 @@ runs — exercised against a real local server, including that an API key never
 reaches an error message or disk — the matrix runner (`backend/run_matrix.py`,
 including interruption and resume, against a stub server), and the scheduling
 example's own suite.
+
+`npm test` covers how Mermaid blocks are found in an output
+(`frontend/tests/mermaidBlocks.test.js`, Node's built-in runner).
 
 ## Design notes
 

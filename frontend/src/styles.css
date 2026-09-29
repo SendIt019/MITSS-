@@ -402,6 +402,31 @@ pre.output {
 .fold summary:hover { color: var(--text-primary); }
 .fold pre.output { margin-top: 8px; }
 
+/* ---------- mermaid diagrams (run panel) ---------- */
+
+.diagram { margin: 0 0 14px; }
+.diagram-canvas {
+  background: #ffffff; border: 1px solid var(--gridline);
+  border-radius: var(--radius-sm); padding: 14px; overflow: auto;
+}
+/* The drawing has a white background in both themes, like the saved PNG. */
+.diagram-canvas img { display: block; max-width: 100%; height: auto; margin: 0 auto; }
+.diagram-actions {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px;
+}
+.diagram-actions .hint { margin: 0; }
+.diagram-pending {
+  background: var(--well); border: 1px dashed var(--gridline);
+  border-radius: var(--radius-sm); padding: 14px;
+  font-family: var(--mono); font-size: 12px; color: var(--text-muted);
+}
+.diagram-error {
+  margin: 0 0 8px; font-size: 13px; color: var(--text-secondary);
+  border-left: 3px solid var(--status-critical); padding-left: 10px;
+  white-space: pre-wrap; word-break: break-word;
+}
+.diagram-error-inline { font-size: 12px; color: var(--status-critical); }
+
 /* ---------- matrix ---------- */
 
 .matrix-wrap { overflow-x: auto; }

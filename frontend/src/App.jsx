@@ -5,6 +5,7 @@ import DiffText, { DiffLegend } from './components/DiffText'
 import Digest from './components/Digest'
 import Inputs from './components/Inputs'
 import Matrix from './components/Matrix'
+import MermaidDiagrams from './components/MermaidDiagrams'
 import Models from './components/Models'
 import {
   Card, CopyButton, Dropzone, Empty, Field, Stat, Tabs, Verdict, VerdictPicker,
@@ -790,6 +791,7 @@ function RunsTab({ runs, openRun, onOpenRun, onReview, onDelete, busy, runLabel 
 
           <h3 className="section">Output</h3>
           <DiffText plain={openRun.output} />
+          <MermaidDiagrams key={openRun.id} text={openRun.output} runId={openRun.id} />
 
           {openRun.reasoning && (
             <details className="fold">
