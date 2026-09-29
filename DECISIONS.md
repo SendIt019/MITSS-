@@ -1352,3 +1352,68 @@ here, after round 2 of at most 3.
   copy fails, the event is in `results.jsonl` and shows in `status` and the
   next summary. A test fails only these copies (run-folder copies still
   succeed) and checks all three places.
+
+## 2026-09-29T15:23:32-05:00 — Step 3 passed on Jake's Mac
+
+Jake ran Step 3 with live models. Claude Code checked the record read-only
+before logging it.
+
+- **Smoke matrix** `20260929-144947-smoke-3-models`: 1 version × 1 input ×
+  llama-3.1-8b, gemma-4-26b-a4b and qwen3.8-27b, every cell recorded in one
+  session (48 s, 52 s and 4m16s). All three answers were truncated at
+  max_tokens 1024.
+- **Resume test.** The first attempt, `20260929-145953-resume-2x2`, ran all
+  4 cells in one session. No stop, resume or adoption was recorded, so it
+  did not exercise the interrupt path. The likely cause is a Ctrl-C that
+  landed during the last cell, which is reported as finished (14:17 entry).
+  Claude Code pointed this out and Jake reran it.
+- **Rerun** `20260929-150813-resume-2x2`: a double Ctrl-C 10 s into cell 1
+  ended the `run` session as "stopped at once by a second Ctrl-C". `resume`
+  found no run to adopt for cell 1, ran it again, and recorded all 4 cells.
+  There are exactly 4 llama-3.1-8b runs since 15:08, so no duplicates.
+- The `check` and `plan` runs that Step 1's "Done when" asked for were
+  covered by Jake's live runs and by the `check` in the Step 4 entry below,
+  which found 0 problems.
+
+## 2026-09-29T15:23:32-05:00 — Lineup max_tokens raised from 1024 to 3072
+
+Jake raised `max_tokens` from 1024 to 3072 on all three lineup
+registrations; the other settings are unchanged. The registrations were
+checked read-only. At 1024 the smoke matrix had 3 of 3 answers truncated,
+and the first 2×2 had 2 of 4. Jake's summary was "every 1024 answer
+truncated"; the record shows 5 of 7. At 3072, three of four llama-3.1-8b
+answers in the rerun finished on their own. The one still truncated (v3 ×
+`02-cav-division-120h`, 3072 completion tokens) is, in Jake's judgment,
+llama-3.1-8b looping, a model-quality problem and not a runner bug. That is
+his verdict from reading the output; the runner only records
+`finish_reason: length`. Qwen and Gemma have not yet been run at 3072.
+
+## 2026-09-29T15:23:32-05:00 — Matrix runner Step 4: docs, and "truncated" has two meanings
+
+The README has a "Matrix runner" section: before a run, the matrix file,
+the commands and exit codes, Ctrl-C, reading the summary, where things go,
+and known limits. It also adds `data/matrices/` to "What is on disk" and
+the runner to "Tests".
+
+- **Truncated.** The usage docs tell the reader to check the summary's
+  truncated count before comparing anything. A truncated answer means
+  either a cap that is too low (normal-length answers cut off; raise
+  `max_tokens`) or a model that is looping (it would hit any cap; a verdict
+  on the model). Only reading the output tells which. Both Step 3 cases are
+  cited.
+- **Known limits** include the two the spec required: a hand-recorded run of
+  the same cell made during an interruption could be adopted by resume, and
+  a first Ctrl-C during the last cell is reported as finished. Also listed:
+  copies outside the repo do not pick up later verdicts, because
+  `review_run` rewrites `run.json` in `data/runs/` only (checked in
+  `store.py`).
+- **Verified, per CLAUDE.md "verify, do not assert".** On 2026-09-29, Claude
+  Code ran `scripts/run_matrix.sh check` (exit 0, 0 problems, one test
+  notification sent), `plan backend/matrices/resume-2x2.json`, `status` and
+  `--help`. The outputs quoted in the README are copied from those runs and
+  from `status` on Jake's matrix runs. `run` and `resume` need a live model,
+  so Claude Code did not run them. Their evidence is Jake's Step 3 runs
+  above, and every behaviour the README describes for them is covered by
+  `tests/test_run_matrix_engine.py`.
+- `backend/export_runs.py` is still untracked, so the README does not
+  mention it.

@@ -1,6 +1,6 @@
 # MITSS Matrix Runner — Build Spec (v2)
 
-Owner: Jake · Builder: Claude Code · Reviewer: Codex · Revised: 2026-09-29, after reading the repo; again after Step 0 (`docs/runner/SURVEY.md`) · Status: Step 0 done, on branch `feat/matrix-runner`
+Owner: Jake · Builder: Claude Code · Reviewer: Codex · Revised: 2026-09-29, after reading the repo; again after Step 0 (`docs/runner/SURVEY.md`) · Status: Steps 0–4 done, on branch `feat/matrix-runner`; usage and known limits in the README's "Matrix runner" section
 
 ## 1. Purpose
 

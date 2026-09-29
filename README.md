@@ -180,6 +180,180 @@ Credentials are read from the environment at call time, sent once in the
 request header, and never logged, returned by the API, or written into stored
 data. `GET /api/llm` reports whether a key is present, never its value.
 
+## Matrix runner
+
+One terminal command runs a whole comparison without anyone watching: every
+chosen version of a prompt × every chosen input × every chosen registered
+model, with an optional repeat count. Each answer is recorded as an ordinary
+run, so it shows up in Outputs, the matrix, the transcript and the review
+queue. A Mac notification with a sound tells you when the matrix finishes or
+stops. The runner records; you judge. Nothing is scored.
+
+It calls local models only (127.0.0.1, localhost, ::1) and always goes through
+`scripts/run_matrix.sh`, which loads `backend/.env` the way `dev.sh` does and
+gives each model load up to 300 seconds (`MITSS_MATRIX_PREFLIGHT_TIMEOUT`
+overrides that). Run everything from the repo root.
+
+### Before a run
+
+Start the model server with `scripts/start_model_server.sh`, then check:
+
+```bash
+scripts/run_matrix.sh check
+```
+
+`check` calls no model. It confirms each lineup registration (or the ones you
+name with `--models`), its model folder, weights and quantization, the GPU
+memory limit, free disk space and that the server is listening. It also sends
+a test notification. Abridged output:
+
+```
+GPU memory limit: 20.0 GiB (iogpu.wired_limit_mb)
+
+qwen3.8-27b (id qwen3-8-27b)
+  settings: temperature=0.2  max_tokens=3072  timeout=120s  enable_thinking=false
+  folder /Users/jakel/Desktop/models/qwen3.8-27b
+  weights 14.1 GiB, 4-bit
+...
+Server http://127.0.0.1:8080/v1/chat/completions: listening
+Test notification sent
+
+check: 0 problem(s), 0 warning(s)
+```
+
+If a model's weights plus 2 GiB are over the memory limit, `check` prints the
+`sudo sysctl iogpu.wired_limit_mb=...` command for you to run yourself. It
+never runs sudo, and the setting resets when the Mac restarts.
+
+### A matrix file
+
+JSON, conventionally in `backend/matrices/`:
+
+```json
+{"name": "resume-2x2", "prompt_id": "lite-comms-plan-from-m-salute",
+ "versions": [2, 3], "inputs": ["01-scout-sam-battalion", "02-cav-division-120h"],
+ "models": ["llama-3-1-8b"], "repeats": 1}
+```
+
+`models` holds registration ids (the Models tab shows them; `qwen3.8-27b` is
+registered as `qwen3-8-27b`). List the fastest model first so problems show up
+early. Each model runs all of its cells before the next one loads. `repeats`
+is 1 to 10 and defaults to 1. Every id must exist, and a quarantined,
+paste-only or non-local model is refused before anything runs.
+
+### Commands
+
+```bash
+scripts/run_matrix.sh plan   MATRIX.json [--models ID[,ID...]]
+scripts/run_matrix.sh run    MATRIX.json [--models ID[,ID...]] [--yes]
+scripts/run_matrix.sh resume MATRIX_RUN_ID [--allow-changed-inputs]
+scripts/run_matrix.sh status [MATRIX_RUN_ID]
+```
+
+`plan` checks the file and shows the cells and an estimate, with no model
+calls:
+
+```
+$ scripts/run_matrix.sh plan backend/matrices/resume-2x2.json
+Matrix resume-2x2: prompt lite-comms-plan-from-m-salute, versions 2, 3, inputs 01-scout-sam-battalion, 02-cav-division-120h, repeats 1
+
+  1. llama-3.1-8b  4 cells  ~3m  (23.9 tok/s from 10 recent run(s), loading not included)
+     id llama-3-1-8b - temperature=0.2  max_tokens=3072  timeout=120s  enable_thinking=false
+
+Total: 4 cells, ~3m
+```
+
+`run` prints the same plan, checks the server, and asks before starting
+(`--yes` skips the question). `--models` runs only some of the file's models.
+It prints one line per cell, then the summary. `resume` finishes an
+interrupted or partly failed matrix: it never records a finished cell again,
+and it refuses if an input it still needs was edited since the plan, unless
+you pass `--allow-changed-inputs`. `status` lists matrix runs, or shows one:
+
+```
+$ scripts/run_matrix.sh status
+20260929-144947-smoke-3-models  3/3 recorded  0 failed  0 skipped  (finished)
+20260929-145953-resume-2x2  4/4 recorded  0 failed  0 skipped  (finished)
+20260929-150813-resume-2x2  4/4 recorded  0 failed  0 skipped  (finished)
+```
+
+Exit codes: 0 every cell recorded, 1 finished with failed or skipped cells,
+2 stopped early (or not started), 3 the matrix or preflight was refused.
+
+**Ctrl-C.** Press it once and the cell in progress finishes and records, then
+the matrix stops, writes its summary and notifies you. Press it twice and the
+matrix stops at once. The request in flight is abandoned, and the model server
+may keep generating until it finishes. Either way, `resume` picks up from
+there, using the id the summary prints.
+
+### Reading the summary: check the truncated count
+
+Every `run` and `resume` ends with a summary, per model and in total:
+
+```
+  llama-3.1-8b: recorded 4/4 · failed 0 · skipped 0 · truncated 1 · 5m03s
+```
+
+Check the **truncated** count before comparing anything. A truncated answer
+stopped at the model's `max_tokens` (`finish_reason: length`) instead of
+ending on its own. It means one of two things, and only reading the output
+tells you which:
+
+- **The cap is too low.** Answers of a normal length are cut off mid-way. Raise
+  `max_tokens` on the registrations and run again. At 1024, all three answers
+  in the first smoke test and two of four llama-3.1-8b answers were
+  truncated. At 3072, three of four llama-3.1-8b answers finished on their
+  own.
+- **The model is looping.** It repeats itself and would run into any cap, so a
+  higher cap only makes the loop longer. That is a verdict on the model, not
+  a runner fault. The one answer still truncated at 3072 was llama-3.1-8b
+  looping on `02-cav-division-120h`.
+
+The console marks each truncated cell `TRUNCATED`, and a finished
+notification includes the count.
+
+### Where things go
+
+Each matrix run gets its own folder, `backend/data/matrices/<matrix-run-id>/`:
+`manifest.json` (every cell, fixed before the first call), `results.jsonl`
+(each cell `started`, then `recorded`, `failed` or `skipped`) and
+`summary.txt`. All three are append-only. The runs themselves are ordinary
+runs in `data/runs/`.
+
+A copy goes to `~/Desktop/AI Outputs/MITSS Runs/<matrix-run-id>/`: the same
+three files, plus `runs/<run-id>/` for every recorded run, copied as each cell
+finishes. A copy that fails is noted in the summary and never stops the
+matrix.
+
+### Known limits
+
+- Runs are sequential, through one mlx_lm.server. A slow model holds up the
+  ones after it.
+- The matrix view shows only the newest run per cell, so review repeats from
+  Outputs or the review queue.
+- The estimate needs earlier runs of the model with a token rate, and it
+  leaves out model loading.
+- The memory check is advisory: weights plus 2 GiB against the limit. It
+  cannot see what else is using memory.
+- A second Ctrl-C abandons the request in flight, but the model server may
+  keep generating until that answer is done.
+- A first Ctrl-C pressed during the last cell is reported as **finished**
+  (exit 0, or 1 with failed cells): every cell ran, so there is nothing left
+  to resume.
+- After an interruption, `resume` looks for a run recorded for the
+  interrupted cell (same prompt, version, model and input, created at or
+  after the cell started, to the second) and adopts it rather than asking
+  the model again. A run of that same cell that you record by hand while the
+  matrix is interrupted could be adopted in its place.
+- A run adopted that way may be missing its `index.jsonl` event, if the
+  interruption landed between the run folder and the event being written.
+  The summary says so, and the event is not added afterwards.
+- The copies outside the repo are taken when each run is recorded. Verdicts
+  and notes set later in the interface change the run in `data/runs/`, not
+  the copy.
+- If copying `summary.txt` itself fails, that failure shows in `status` and
+  in the next summary, not in the summary that failed to copy.
+
 ## What is on disk
 
 Everything is plain files — readable and greppable without this application.
@@ -194,6 +368,10 @@ backend/data/
     input.txt         the material
   models/<model-id>/
     model.json        a registered model: details, never credentials
+  matrices/<matrix-run-id>/
+    manifest.json     a matrix run's cells, fixed before the first call
+    results.jsonl     append-only: each cell started, then its result
+    summary.txt       append-only: one block per run or resume
   runs/<run-id>/
     run.json          model, input, verdict, notes, timestamps
     template.txt      the prompt version used
@@ -273,7 +451,9 @@ The backend suite covers: the pipeline core (storage, immutable versioning, inpu
 sets, prompt rendering, verdicts, diffing, the matrix, the transcript, the
 model registry, the digest), the HTTP surface, the model harness and batch
 runs — exercised against a real local server, including that an API key never
-reaches an error message or disk — and the scheduling example's own suite.
+reaches an error message or disk — the matrix runner (`backend/run_matrix.py`,
+including interruption and resume, against a stub server), and the scheduling
+example's own suite.
 
 ## Design notes
 
