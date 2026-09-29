@@ -29,15 +29,24 @@ import statistics
 import subprocess
 import sys
 import urllib.parse
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Optional
 
 from app import service
 from mitss.llm import (
-    DEFAULT_MAX_TOKENS, DEFAULT_PREFLIGHT_TIMEOUT, DEFAULT_TIMEOUT,
-    LLMModelUnavailable, check_model_folder, describe_settings, is_local_url,
-    models_dir, resolve_model_path,
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_PREFLIGHT_TIMEOUT,
+    DEFAULT_TIMEOUT,
+    LLMModelUnavailable,
+    check_model_folder,
+    describe_settings,
+    is_local_url,
+    models_dir,
+    resolve_model_path,
 )
+from pipeline import NotFound, Store
+
 # The store's own id alphabet, so a name that passes here is safe as a
 # directory name for the same reason a run id is.
 from pipeline.store import _SAFE_ID, text_sha256
@@ -82,9 +91,41 @@ METAL_PROBE = ("import mlx.core as mx; "
 class MatrixError(Exception):
     """A matrix file or plan that cannot run, with every reason found."""
 
-    def __init__(self, problems: List[str]):
+    def __init__(self, problems: list[str]):
         super().__init__("; ".join(problems))
         self.problems = problems
+
+
+# --------------------------------------------------------------------------
+# reading the store
+# --------------------------------------------------------------------------
+
+class ReadOnlyStore(Store):
+    """The store, for reading only: it never creates a folder.
+
+    `Store.__init__` calls `ensure()`, which makes the data folders. `check`
+    and `plan` must leave a data directory exactly as they found it, missing
+    or not. Runs are recorded in Step 2 through app.service, never through this.
+    """
+
+    def ensure(self) -> None:
+        pass
+
+
+def read_store(root: str | None = None) -> ReadOnlyStore:
+    # The same data root service.store() resolves, so the runner and the web
+    # app always read the same place.
+    return ReadOnlyStore(root or os.environ.get("MITSS_ROOT", service.BACKEND_ROOT))
+
+
+def registration(shelf: Store, model_id: str) -> dict[str, Any]:
+    """A registration's own summary.
+
+    Deliberately not service.get_model: that looks up the key variable to
+    report `key_set`, and the runner never touches a key variable, not even
+    to see whether it is set. Raises NotFound.
+    """
+    return shelf.get_model(model_id).summary()
 
 
 # --------------------------------------------------------------------------
@@ -95,9 +136,9 @@ class MatrixError(Exception):
 class Matrix:
     name: str
     prompt_id: str
-    versions: List[int]
-    inputs: List[str]
-    models: List[str]
+    versions: list[int]
+    inputs: list[str]
+    models: list[str]
     repeats: int = 1
 
 
@@ -105,7 +146,7 @@ def _is_safe_id(value: Any) -> bool:
     return isinstance(value, str) and bool(_SAFE_ID.fullmatch(value))
 
 
-def _id_list(raw: Dict[str, Any], key: str, problems: List[str]) -> List[str]:
+def _id_list(raw: dict[str, Any], key: str, problems: list[str]) -> list[str]:
     values = raw.get(key)
     if not isinstance(values, list) or not values:
         problems.append(f"{key} must be a non-empty list of ids")
@@ -122,7 +163,7 @@ def parse_matrix(raw: Any) -> Matrix:
     """Check a matrix file's shape. The store is not consulted here."""
     if not isinstance(raw, dict):
         raise MatrixError(["the matrix file must hold a JSON object"])
-    problems: List[str] = []
+    problems: list[str] = []
     unknown = sorted(set(raw) - set(MATRIX_KEYS))
     if unknown:
         problems.append(f"unknown key(s): {', '.join(unknown)}; "
@@ -189,7 +230,7 @@ class Cell:
     input_id: str
     repeat: int
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {"index": self.index, "model_id": self.model_id,
                 "model": self.model, "version": self.version,
                 "input_id": self.input_id, "repeat": self.repeat}
@@ -198,13 +239,13 @@ class Cell:
 @dataclass
 class Plan:
     matrix: Matrix
-    models: List[Dict[str, Any]]          # registrations, in run order
-    inputs: Dict[str, Dict[str, str]]     # id -> name and sha256 at plan time
-    cells: List[Cell] = field(default_factory=list)
+    models: list[dict[str, Any]]          # registrations, in run order
+    inputs: dict[str, dict[str, str]]     # id -> name and sha256 at plan time
+    cells: list[Cell] = field(default_factory=list)
 
 
-def _selected_models(matrix: Matrix, only: Optional[Sequence[str]],
-                     problems: List[str]) -> List[str]:
+def _selected_models(matrix: Matrix, only: Sequence[str] | None,
+                     problems: list[str]) -> list[str]:
     if not only:
         return list(matrix.models)
     for model_id in only:
@@ -215,49 +256,47 @@ def _selected_models(matrix: Matrix, only: Optional[Sequence[str]],
     return [m for m in matrix.models if m in only]
 
 
-def build_plan(matrix: Matrix, only: Optional[Sequence[str]] = None,
-               root: Optional[str] = None) -> Plan:
+def build_plan(matrix: Matrix, only: Sequence[str] | None = None,
+               root: str | None = None) -> Plan:
     """Check the matrix against the store and lay out every cell.
 
     Every problem is collected before refusing, so one pass fixes the file.
     A quarantined or paste-only model is refused here rather than skipped
     later: a matrix that silently lost a model would compare less than it says.
     """
-    problems: List[str] = []
+    problems: list[str] = []
     model_ids = _selected_models(matrix, only, problems)
+    shelf = read_store(root)
 
     try:
-        prompt = service.prompt_detail(matrix.prompt_id, root=root)
-        known = {v["version"] for v in prompt["versions"]}
+        prompt = shelf.get_prompt(matrix.prompt_id)
         for version in matrix.versions:
-            if version not in known:
+            if prompt.version(version) is None:
                 problems.append(f"prompt '{matrix.prompt_id}' has no version {version}")
-    except service.ServiceError as exc:
-        problems.append(f"prompt: {exc.message}")
+    except NotFound as exc:
+        problems.append(f"prompt: {exc}")
 
-    inputs: Dict[str, Dict[str, str]] = {}
+    inputs: dict[str, dict[str, str]] = {}
     for input_id in matrix.inputs:
         try:
-            found = service.get_input(input_id, root=root)
-        except service.ServiceError as exc:
-            problems.append(f"input: {exc.message}")
+            found = shelf.get_input(input_id)
+        except NotFound as exc:
+            problems.append(f"input: {exc}")
             continue
         # The same function the store fingerprints runs with, so a plan-time
         # hash compares directly with a run's input_sha256.
-        inputs[input_id] = {"name": found["name"],
-                            "sha256": text_sha256(found["text"])}
+        inputs[input_id] = {"name": found.name, "sha256": text_sha256(found.text)}
 
-    models: List[Dict[str, Any]] = []
+    models: list[dict[str, Any]] = []
     for model_id in model_ids:
         try:
-            entry = service.get_model(model_id, root=root)
-        except service.ServiceError as exc:
-            problems.append(f"model: {exc.message}")
+            entry = registration(shelf, model_id)
+        except NotFound as exc:
+            problems.append(f"model: {exc}")
             continue
-        if entry["quarantine"]:
-            problems.append(f"model '{model_id}' is quarantined: {entry['quarantine']}")
-        elif not entry["callable"]:
-            problems.append(f"model '{model_id}' is paste-only (no url)")
+        refusal = refuse_model(entry)
+        if refusal:
+            problems.append(f"model '{model_id}' {refusal}")
         else:
             models.append(entry)
 
@@ -276,7 +315,21 @@ def build_plan(matrix: Matrix, only: Optional[Sequence[str]] = None,
     return plan
 
 
-def _max_tokens(entry: Dict[str, Any]) -> int:
+def refuse_model(entry: dict[str, Any]) -> str | None:
+    """Why a registration cannot be in a matrix, or None if it can."""
+    if entry["quarantine"]:
+        return f"is quarantined: {entry['quarantine']}"
+    if not entry["callable"]:
+        return "is paste-only (no url)"
+    if not is_local_url(entry["url"]):
+        # Local only (DECISIONS.md 2026-09-29): the runner has no network
+        # beyond this machine's model server.
+        return (f"is not on this machine ({entry['url']}); the runner only "
+                "calls loopback endpoints (127.0.0.1, localhost, ::1)")
+    return None
+
+
+def _max_tokens(entry: dict[str, Any]) -> int:
     configured = (entry.get("settings") or {}).get("max_tokens")
     if isinstance(configured, int):
         return configured
@@ -286,8 +339,8 @@ def _max_tokens(entry: Dict[str, Any]) -> int:
         return DEFAULT_MAX_TOKENS
 
 
-def estimate_cell_seconds(entry: Dict[str, Any],
-                          root: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def estimate_cell_seconds(entry: dict[str, Any],
+                          root: str | None = None) -> dict[str, Any] | None:
     """Seconds per cell from this model's recent runs, or None without data.
 
     Only runs where the server reported a real token count carry
@@ -296,8 +349,8 @@ def estimate_cell_seconds(entry: Dict[str, Any],
     max_tokens. Model loading is not included.
     """
     samples = []
-    for run in service.list_runs(model=entry["name"], root=root):   # newest first
-        usage = run.get("usage") or {}
+    for run in read_store(root).list_runs(model=entry["name"]):   # newest first
+        usage = run.usage or {}
         rate = usage.get("tokens_per_second")
         produced = usage.get("completion_tokens")
         if isinstance(rate, (int, float)) and rate > 0 and isinstance(produced, int):
@@ -318,7 +371,7 @@ def format_duration(seconds: float) -> str:
     return f"~{minutes // 60}h{minutes % 60:02d}m"
 
 
-def format_plan(plan: Plan, estimates: Dict[str, Optional[Dict[str, Any]]]) -> str:
+def format_plan(plan: Plan, estimates: dict[str, dict[str, Any] | None]) -> str:
     matrix = plan.matrix
     lines = [
         (f"Matrix {matrix.name}: prompt {matrix.prompt_id}, "
@@ -357,10 +410,10 @@ def format_plan(plan: Plan, estimates: Dict[str, Optional[Dict[str, Any]]]) -> s
 # system facts: commands are argument lists, never a shell string
 # --------------------------------------------------------------------------
 
-Runner = Callable[[List[str]], Optional[str]]
+Runner = Callable[[list[str]], Optional[str]]
 
 
-def run_command(command: List[str]) -> Optional[str]:
+def run_command(command: list[str]) -> str | None:
     """stdout of a command that succeeded, else None. No shell, ever."""
     try:
         done = subprocess.run(command, capture_output=True, text=True,
@@ -370,16 +423,16 @@ def run_command(command: List[str]) -> Optional[str]:
     return done.stdout if done.returncode == 0 else None
 
 
-def sysctl_command(name: str) -> List[str]:
+def sysctl_command(name: str) -> list[str]:
     return ["sysctl", "-n", name]
 
 
-def metal_command() -> List[str]:
+def metal_command() -> list[str]:
     python = os.path.join(os.path.expanduser(MODELS_ENV), "bin", "python")
     return [python, "-c", METAL_PROBE]
 
 
-def notification_command(title: str, body: str, sound: str = "Glass") -> List[str]:
+def notification_command(title: str, body: str, sound: str = "Glass") -> list[str]:
     """osascript with the text passed as arguments, never built into the script."""
     return ["osascript",
             "-e", "on run argv",
@@ -389,7 +442,7 @@ def notification_command(title: str, body: str, sound: str = "Glass") -> List[st
             title, body]
 
 
-def _as_int(text: Optional[str]) -> Optional[int]:
+def _as_int(text: str | None) -> int | None:
     try:
         return int((text or "").strip())
     except ValueError:
@@ -398,9 +451,9 @@ def _as_int(text: Optional[str]) -> Optional[int]:
 
 @dataclass
 class Memory:
-    limit: Optional[int]    # bytes the GPU may wire, or None if unknown
+    limit: int | None    # bytes the GPU may wire, or None if unknown
     source: str
-    ram: Optional[int]
+    ram: int | None
 
 
 def read_memory(run: Runner = run_command) -> Memory:
@@ -419,8 +472,8 @@ def read_memory(run: Runner = run_command) -> Memory:
     return Memory(None, "not readable", None)
 
 
-def memory_warning(weights: int, limit: Optional[int],
-                   ram: Optional[int] = None) -> Optional[str]:
+def memory_warning(weights: int, limit: int | None,
+                   ram: int | None = None) -> str | None:
     """What to tell Jake when a model may not fit, else None."""
     if limit is None or weights + HEADROOM <= limit:
         return None
@@ -445,7 +498,7 @@ def weights_bytes(folder: str) -> int:
     return sum(os.path.getsize(p) for p in glob.glob(os.path.join(folder, "*.safetensors")))
 
 
-def quantization(config: Dict[str, Any]) -> str:
+def quantization(config: dict[str, Any]) -> str:
     """Top-level bits, and "mixed" when some layers override them."""
     quant = config.get("quantization") or config.get("quantization_config")
     if not isinstance(quant, dict) or "bits" not in quant:
@@ -458,11 +511,11 @@ def quantization(config: Dict[str, Any]) -> str:
     return f"{bits}-bit"
 
 
-def server_listening(url: str, timeout: float = 2.0) -> Optional[bool]:
+def server_listening(url: str, timeout: float = 2.0) -> bool | None:
     """Whether something accepts connections at a local endpoint.
 
-    A TCP connect only: no request is sent and no model is touched. Remote
-    endpoints are not probed (None) - the runner has no network of its own.
+    A TCP connect only: no request is sent and no model is touched. A remote
+    endpoint is never probed (None); check refuses those registrations first.
     """
     if not is_local_url(url):
         return None
@@ -475,7 +528,7 @@ def server_listening(url: str, timeout: float = 2.0) -> Optional[bool]:
         return False
 
 
-def free_bytes(path: str) -> Optional[int]:
+def free_bytes(path: str) -> int | None:
     """Free space on the volume holding `path`, or its nearest existing parent."""
     path = os.path.abspath(os.path.expanduser(path))
     while not os.path.exists(path):
@@ -486,7 +539,7 @@ def free_bytes(path: str) -> Optional[int]:
     return shutil.disk_usage(path).free
 
 
-def environment_lines(env: Optional[Dict[str, str]] = None) -> List[str]:
+def environment_lines(env: dict[str, str] | None = None) -> list[str]:
     """The five variables `check` may show, and nothing else from the environment."""
     env = os.environ if env is None else env
     defaults = {
@@ -512,7 +565,7 @@ class Report:
     """Lines for the console, plus counts of problems and warnings."""
 
     def __init__(self) -> None:
-        self.lines: List[str] = []
+        self.lines: list[str] = []
         self.problems = 0
         self.warnings = 0
 
@@ -529,10 +582,11 @@ class Report:
 
 
 def _check_model(report: Report, model_id: str, memory: Memory,
-                 root: Optional[str]) -> Optional[Dict[str, Any]]:
+                 shelf: Store) -> dict[str, Any] | None:
+    """Report one registration; return it when its server should be probed."""
     try:
-        entry = service.get_model(model_id, root=root)
-    except service.ServiceError:
+        entry = registration(shelf, model_id)
+    except NotFound:
         report.say(f"{model_id}")
         report.problem("not registered (Step 1 printed the registration payload)")
         return None
@@ -541,14 +595,11 @@ def _check_model(report: Report, model_id: str, memory: Memory,
     report.say(f"{entry['name']} (id {entry['id']})")
     report.say(f"  settings: {describe_settings(settings) or 'harness defaults'}"
                + ("" if thinking is not None else "  [enable_thinking not set]"))
-    if entry["quarantine"]:
-        report.problem(f"quarantined: {entry['quarantine']}")
-    if not entry["callable"]:
-        report.problem("paste-only (no url)")
-        return entry
-    if not is_local_url(entry["url"]):
-        report.say(f"  remote endpoint {entry['url']}; folder and memory not checked")
-        return entry
+    refusal = refuse_model(entry)
+    if refusal:
+        report.problem(refusal)
+        if not entry["callable"] or not is_local_url(entry["url"]):
+            return None
 
     folder = resolve_model_path(entry["model"])
     try:
@@ -569,12 +620,12 @@ def _check_model(report: Report, model_id: str, memory: Memory,
     return entry
 
 
-def check(model_ids: Sequence[str] = LINEUP, root: Optional[str] = None,
+def check(model_ids: Sequence[str] = LINEUP, root: str | None = None,
           run: Runner = run_command,
-          listening: Callable[[str], Optional[bool]] = server_listening) -> Report:
+          listening: Callable[[str], bool | None] = server_listening) -> Report:
     """Everything a matrix needs before it starts, without calling a model."""
     report = Report()
-    shelf = service.store(root)
+    shelf = read_store(root)
     report.say(f"Data root: {shelf.root}")
     report.say("Environment:")
     for line in environment_lines():
@@ -591,16 +642,13 @@ def check(model_ids: Sequence[str] = LINEUP, root: Optional[str] = None,
     report.say("")
     urls = []
     for model_id in model_ids:
-        entry = _check_model(report, model_id, memory, root)
-        if entry and entry["callable"] and entry["url"] not in urls:
+        entry = _check_model(report, model_id, memory, shelf)
+        if entry and entry["url"] not in urls:
             urls.append(entry["url"])
 
     report.say("")
     for url in urls:
-        state = listening(url)
-        if state is None:
-            report.say(f"Server {url}: remote, not probed")
-        elif state:
+        if listening(url):
             report.say(f"Server {url}: listening")
         else:
             report.say(f"Server {url}: not listening")
@@ -642,7 +690,7 @@ class _Parser(argparse.ArgumentParser):
         self.exit(EXIT_INVALID, f"{self.prog}: error: {message}\n")
 
 
-def _model_list(text: str) -> List[str]:
+def _model_list(text: str) -> list[str]:
     return [part.strip() for part in text.split(",") if part.strip()]
 
 
@@ -660,7 +708,7 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "check":
         report = check(args.models)

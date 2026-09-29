@@ -1176,3 +1176,51 @@ and the `started` time at whole-second precision in the same time zone (both
 from `store.now()`, local time to the second). The Step 4 known-limits list
 must say that a manual run of the same cell made while a matrix is
 interrupted could be adopted by resume.
+
+## 2026-09-29T13:42:51-05:00 — Step 1 review fixes: key variable, loopback only, read-only store
+
+From Codex's Step 1 review, with Jake's decisions (`docs/runner/reviews/step-1-round-1.md`).
+
+- **Key variable (Jake downgraded it to minor; fixed).** `service.get_model`
+  builds its reply with `_model_payload`, which looks up the registration's
+  `key_env` variable to report `key_set`. The runner now reads a
+  registration as the store's own `ModelEntry.summary()`, so it never looks
+  up a key variable, not even to see whether it is set. A test swaps
+  `os.environ` for a recorder and fails if the name is looked up.
+- **Loopback only.** `plan` refuses, and `check` reports as a problem, any
+  registration whose URL is not 127.0.0.1, localhost or ::1. `check` never
+  probes it. Tests cover all three loopback spellings and a remote URL.
+- **Read-only store.** `Store.__init__` calls `ensure()`, which creates the
+  four data folders, and every `service` read builds a `Store`. `check` and
+  `plan` now read through `ReadOnlyStore`, a subclass in `run_matrix.py`
+  whose `ensure()` does nothing. It uses the same data root as
+  `service.store()`. `pipeline/store.py` and `app/service.py` are unchanged.
+  Tests: a missing data directory stays empty after `check`, `plan` and the
+  estimate, and an existing data root is byte-identical afterwards.
+- The three new tests were checked by putting each old behaviour back in a
+  scratch process; each test failed as it should.
+
+## 2026-09-29T13:42:51-05:00 — Ruff gate pinned to Python 3.9 and must pass (reverses part of 13:27)
+
+Jake's decision: the gate is `uvx ruff check --target-version py39 <changed
+files>`, and it must pass rather than be waived. Python 3.9 compatibility
+beats ruff's 3.10 syntax advice. This replaces the 13:27 choice to leave 63
+typing findings and one I001 in the new files.
+
+With `py39` as the target, ruff still asks for `list[...]` and `X | None`,
+but only in annotations. Both new files use `from __future__ import
+annotations`, which makes those valid on 3.9. Ruff's fixes were applied. They
+changed only annotations and the import layout. The one runtime alias
+(`Runner`) keeps `Optional`, because `str | None` would fail at runtime on
+3.9. The module imports and the full suite passes on 3.9.6. The rest of the
+backend keeps `typing`; only changed files are gated.
+
+## 2026-09-29T13:42:51-05:00 — Claude Code runs the Codex review loop
+
+Jake's instruction: from Step 1's fixes on, Claude Code runs Codex's review
+itself with `codex exec --sandbox read-only`, saves every review verbatim to
+`docs/runner/reviews/step-N-round-M.md`, fixes blockers, majors and minors
+(minors unless they conflict with the spec or a logged decision), and stops
+to ask Jake about any finding it disagrees with. At most 3 rounds per step;
+it stops when Codex approves. It never starts the next step or runs anything
+that needs a live model. The procedure is `docs/runner/REVIEW_LOOP.md`.

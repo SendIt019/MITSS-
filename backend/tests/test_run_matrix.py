@@ -406,6 +406,101 @@ class CheckTests(_DataRoot):
         self.assertIsNone(rm.server_listening("https://api.example.invalid/v1"))
 
 
+class _EnvSpy(dict):
+    """A stand-in for os.environ that records every name looked up."""
+
+    def __init__(self, base):
+        super().__init__(base)
+        self.asked = set()
+
+    def get(self, key, default=None):
+        self.asked.add(key)
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        self.asked.add(key)
+        return super().__getitem__(key)
+
+    def __contains__(self, key):
+        self.asked.add(key)
+        return super().__contains__(key)
+
+
+class ReviewFixTests(_DataRoot):
+    """Codex's Step 1 review: key variables, remote endpoints, store writes."""
+
+    def fake_run(self):
+        return _runner({"hw.memsize": str(24 * rm.GIB), "iogpu.wired_limit_mb": "0",
+                        "metal": str(20 * rm.GIB)})
+
+    def test_the_key_variable_is_never_looked_up(self):
+        keyed = service.register_model("keyed-7b", url=CLOSED, key_env="TEAM_7B_KEY",
+                                       root=self.root)["id"]
+        spy = _EnvSpy(os.environ)
+        spy["TEAM_7B_KEY"] = "sk-never-read"
+        with mock.patch.object(os, "environ", spy), \
+                mock.patch.object(service, "_model_payload",
+                                  side_effect=AssertionError("service.get_model used")):
+            report = rm.check([keyed], root=self.root, run=self.fake_run(),
+                              listening=lambda url: True)
+            plan = rm.build_plan(self.matrix(models=[keyed]), root=self.root)
+            rm.estimate_cell_seconds(plan.models[0], root=self.root)
+        self.assertNotIn("TEAM_7B_KEY", spy.asked)
+        self.assertNotIn("sk-never-read", "\n".join(report.lines))
+        self.assertNotIn("key_set", plan.models[0])
+
+    def test_remote_endpoints_are_refused(self):
+        remote = service.register_model(
+            "cloud-70b", url="https://api.example.invalid/v1/chat/completions",
+            root=self.root)["id"]
+        with self.assertRaises(rm.MatrixError) as caught:
+            rm.build_plan(self.matrix(models=[self.fast, remote]), root=self.root)
+        self.assertIn("not on this machine", " | ".join(caught.exception.problems))
+
+        probed = []
+        report = rm.check([remote], root=self.root, run=self.fake_run(),
+                          listening=lambda url: probed.append(url) or True)
+        self.assertEqual(report.problems, 1)
+        self.assertIn("only calls loopback endpoints", "\n".join(report.lines))
+        self.assertEqual(probed, [])
+
+    def test_every_loopback_spelling_is_accepted(self):
+        for url in ("http://127.0.0.1:8080/v1/chat/completions",
+                    "http://localhost:8080/v1/chat/completions",
+                    "http://[::1]:8080/v1/chat/completions"):
+            with self.subTest(url=url):
+                service.update_model(self.fast, url=url, root=self.root)
+                plan = rm.build_plan(self.matrix(models=[self.fast]), root=self.root)
+                self.assertEqual(plan.models[0]["url"], url)
+
+    def test_nothing_is_created_under_a_missing_data_directory(self):
+        with tempfile.TemporaryDirectory() as empty:
+            rm.check(rm.LINEUP, root=empty, run=self.fake_run(),
+                     listening=lambda url: True)
+            with self.assertRaises(rm.MatrixError):
+                rm.build_plan(self.matrix(), root=empty)
+            rm.estimate_cell_seconds({"name": "x", "settings": {}}, root=empty)
+            self.assertEqual(os.listdir(empty), [])
+
+    def test_an_existing_data_directory_is_left_exactly_as_it_was(self):
+        def snapshot():
+            found = {}
+            for folder, _, files in os.walk(self.root):
+                for name in files:
+                    path = os.path.join(folder, name)
+                    with open(path, "rb") as handle:
+                        found[path] = handle.read()
+                found[folder] = None
+            return found
+
+        before = snapshot()
+        rm.check([self.fast, self.slow, "ghost"], root=self.root,
+                 run=self.fake_run(), listening=lambda url: False)
+        plan = rm.build_plan(self.matrix(), root=self.root)
+        rm.estimate_cell_seconds(plan.models[0], root=self.root)
+        self.assertEqual(snapshot(), before)
+
+
 class CommandLineTests(_DataRoot):
     def main(self, *argv):
         out, err = io.StringIO(), io.StringIO()

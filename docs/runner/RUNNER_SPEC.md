@@ -140,7 +140,7 @@ Default location: `~/Desktop/AI Outputs/MITSS Runs/<matrix_run_id>/`. It holds t
 
 These add to the invariants in `CLAUDE.md`.
 
-1. No network of its own. Model calls go through the service, to 127.0.0.1.
+1. No network of its own. Model calls go through the service, to loopback only: `plan` and `check` refuse a registration whose URL is not 127.0.0.1, localhost or ::1.
 2. No credentials. Never read `backend/.env` or its backups.
 3. No sudo and no system-setting changes; print the command for Jake instead.
 4. `subprocess` with argument lists only (`osascript`, `sysctl`). No `shell=True`, `eval` or `exec`.
@@ -149,6 +149,7 @@ These add to the invariants in `CLAUDE.md`.
 7. Registrations are data. The runner never creates or edits them; changes are printed for Jake to apply.
 8. Standard library only, and it runs on Python 3.9.
 9. Environment: for the runner, `backend/.env` is loaded only by `scripts/run_matrix.sh`, the same way `dev.sh` loads it. `run_matrix.py` never opens it. `check` prints only the data root and the five variables named in §5.3, never any other environment value.
+10. Reading never writes: `check` and `plan` read through a read-only store that creates nothing under `data/`, and read registrations as the store's own summary, never through `service.get_model`, so a key variable is never looked up, not even to see whether it is set.
 
 ## 7. Tests
 
@@ -173,7 +174,7 @@ Every existing test must still pass, including the Python 3.9 no-dependencies su
 python3 -m unittest discover tests
 python3 -m compileall -q .
 uvx --with fastapi --with python-multipart --with httpx2 pytest -q tests
-uvx ruff check <changed .py files>
+uvx ruff check --target-version py39 <changed .py files>   # must pass
 uv run --no-project --python 3.9 python -m unittest discover tests
 ```
 
