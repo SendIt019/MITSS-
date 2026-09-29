@@ -1327,3 +1327,13 @@ Codex requested changes (`docs/runner/reviews/step-2-round-1.md`).
   "finished" (exit 0, or 1 when a cell failed), because nothing was left to
   stop and every cell ran. Claude Code disagrees with the finding, and under
   the review-loop rules it goes to Jake rather than being argued with Codex.
+
+## 2026-09-29T14:17:07-05:00 — A Ctrl-C during the last cell is reported as finished (Jake's decision)
+
+On Codex's Step 2 round-1 minor, Jake chose option (a): keep "finished". A
+first Ctrl-C lets the current cell finish. When that cell is the last one,
+every cell has run and nothing is left to resume, so the matrix is reported as
+finished: exit 0 (or 1 with failed cells), the "finished" notification, and
+no resume command. Reporting "stopped" would point at a resume that only
+says "Nothing to resume". A test pins the behaviour, spec §5.4 says so, and
+Step 4's known-limits list must mention it.

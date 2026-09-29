@@ -257,6 +257,19 @@ class RunTests(_Base):
         # The handler is put back afterwards.
         self.assertIs(signal.getsignal(signal.SIGINT), signal.default_int_handler)
 
+    def test_first_ctrl_c_during_the_last_cell_is_reported_as_finished(self):
+        # Jake's decision on Codex's Step 2 round-1 minor: nothing was left
+        # to stop, so it is a finished matrix, not a stopped one.
+        def ctrl_c():
+            os.kill(os.getpid(), signal.SIGINT)
+
+        self.assertEqual(self.start(FakeModel(self.root, {8: ctrl_c})), rm.EXIT_OK)
+        self.assertEqual(len(self.events("recorded")), 8)
+        self.assertEqual(self.events("session_end")[-1]["outcome"], "finished")
+        self.assertIn("finished, every cell recorded", self.summary())
+        self.assertNotIn("Resume:", self.summary())
+        self.assertEqual(self.runner.notifications[-1][0], "MITSS matrix finished")
+
     def test_second_ctrl_c_stops_at_once_and_still_writes_the_summary(self):
         def ctrl_c_twice():
             os.kill(os.getpid(), signal.SIGINT)
