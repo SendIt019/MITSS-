@@ -1516,3 +1516,12 @@ only watched for non-local hosts and its hostile case had no image node.
   Confirmed it fails with the CSP stripped from the build and passes with it.
 - `style … fill:url(…)` was tried too; Mermaid's flowchart grammar rejects
   `url(` there, so it is not in the check.
+
+## 2026-09-29T15:58:00-05:00 — Mermaid review round 2: approved, no findings
+
+Codex approved the Mermaid review panel with no findings
+(`docs/mermaid/reviews/round-2.md`). Its read-only sandbox could not run the
+backend suite, the build or the browser check; all three were run outside it
+before the round-1 fix was committed and passed (backend OK, `npm test` 11/11,
+build OK, `npm run check:browser` OK). Not yet looked at by eye in Jake's own
+browser; the steps are in the hand-off report.
