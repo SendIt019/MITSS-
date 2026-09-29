@@ -261,3 +261,5 @@ want them.
 - Items 8.4 to 8.7: agreed as proposed.
 - Untracked files: `docs/runner/`, `AGENTS.md` and `.claude/` committed in
   Step 0; `backend/exports/` gitignored; `backend/export_runs.py` left untracked.
+- Changed after Codex's Step 0 review: resume reconciles interrupted cells
+  from the run folders rather than from `index.jsonl` (spec §5.4, `DECISIONS.md`).

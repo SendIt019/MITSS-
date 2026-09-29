@@ -1089,3 +1089,33 @@ Spec §2, §5.1, §5.3, §5.4, §6, §7, §8 and §9 were updated to match.
 instructions. `backend/exports/` is now gitignored; it holds exported copies
 of run text, the same data as `backend/data/`. `backend/export_runs.py` stays
 untracked for now, because the runner does not need it.
+
+## 2026-09-29T13:11:46-05:00 — Resume reconciles from run folders, not index.jsonl (reverses part of 12:42)
+
+Codex's Step 0 review (major) found a gap in the 12:42 entry "Resume
+reconciles interrupted cells from index.jsonl". `Store.create_run` writes
+the run folder first, then the transcript entry, then the `index.jsonl`
+event (`backend/pipeline/store.py:497-521`). A second Ctrl-C between those
+writes leaves a complete run with no index event. Outputs, the matrix and the
+review queue show it, because they read run folders through `list_runs`. An
+index-only check would miss it, and resume would record the cell again.
+
+- The run folder is the record. For a cell with a `started` line and no
+  result, resume calls `service.list_runs` with the cell's prompt, version,
+  model name and input. It adopts the earliest run created at or after the
+  `started` time whose `run_id` no result line has claimed. Checking claims
+  keeps a repeat of the same cell from adopting its sibling's run.
+- `run.json` is the last file `_persist_run` writes, and `list_runs` skips a
+  folder without it. An interruption before that point leaves no run, so the
+  cell is run again.
+- If an adopted run has no `run_recorded` event, the result line and the
+  summary say so. The runner does not append the missing event or transcript
+  entry: runs are recorded only through the service, and the gap is reported
+  rather than papered over.
+- Protecting the write sequence itself was considered and rejected. The
+  writes happen inside `generate_run`, so the runner cannot mark them off
+  from the network wait without changing the service. A worker thread could
+  not stop "at once" without killing a write in progress.
+
+The `started` lines and the two-stage Ctrl-C from 12:42 stand. Spec §5.4 and
+§7 were updated.
