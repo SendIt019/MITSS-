@@ -124,7 +124,10 @@ in the order they appear. The output text itself is unchanged above them.
   library is not even downloaded for them.
 - Model output is untrusted. Mermaid runs with `securityLevel: "strict"`, a
   `%%{init}%%` directive in the output cannot change that, and the drawing is
-  shown as an image, so nothing in it can run script or fetch anything.
+  shown as an image, so nothing in it can run script. The page's content
+  security policy (`frontend/index.html`) stops a diagram from fetching
+  anything while Mermaid lays it out: a block that names an image URL fails
+  with a message instead.
 - Mermaid is an npm dependency bundled by Vite, so this works offline.
 
 ## Plugging in your model
@@ -475,6 +478,11 @@ example's own suite.
 
 `npm test` covers how Mermaid blocks are found in an output
 (`frontend/tests/mermaidBlocks.test.js`, Node's built-in runner).
+`npm run check:browser` builds the interface and drives the installed Chrome
+through valid, invalid, mixed, unclosed and hostile Mermaid outputs and one
+with none, then saves a PNG. It starts its own backend on a temporary data
+root, so it never writes to `backend/data/`, and fails if any image named in
+model output reaches a server.
 
 ## Design notes
 

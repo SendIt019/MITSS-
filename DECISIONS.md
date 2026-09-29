@@ -1485,3 +1485,34 @@ matrix runner and does not apply to this separate feature.
   nodes left in the page. The no-Mermaid run's panel was also screenshotted
   against a build of `feat/matrix-runner`: pixel-identical, and identical
   HTML.
+
+## 2026-09-29T15:52:00-05:00 — Mermaid review round 1: a content security policy
+
+Codex (`docs/mermaid/reviews/round-1.md`, request changes) found one major,
+and it was right: `mermaid.render()` lays the SVG out in the live page before
+it becomes an inert `<img>`, and strict mode still accepts image nodes
+(`A@{ img: "https://…" }`), so the browser fetched a URL named in model
+output, remote or the app's own API. The earlier check missed it because it
+only watched for non-local hosts and its hostile case had no image node.
+
+- **Fix: a CSP in `frontend/index.html`.** `img-src data: blob:`, `font-src
+  data:`, `style-src 'self' 'unsafe-inline'`, and `none` for media, objects,
+  frames, `base-uri` and `form-action`. The app itself loads nothing but
+  `data:` images, so nothing else changed. `script-src` is left alone because
+  the Vite dev server injects an inline script; checked that `npm run dev`
+  still draws diagrams with no console errors. A CSP was chosen over
+  rewriting the Mermaid code because it holds for any syntax that names a
+  URL, including ones Mermaid adds later.
+- A block with an image node now fails visibly with "It links an image, and
+  images named in model output are never loaded." and its raw code, instead
+  of Mermaid's "The source image cannot be decoded."
+- **Regression check committed**: `npm run check:browser`
+  (`frontend/tests/browser/mermaid-check.mjs`, `playwright-core` added as a
+  dev dependency, no browser download; it uses the installed Chrome). It
+  starts its own backend on a temp `MITSS_ROOT` and its own `vite preview`,
+  so it cannot write to real data. It checks every case in the first entry
+  plus image nodes pointing at a remote host and at the app's own API, and
+  fails unless each such fetch was refused by the CSP and never answered.
+  Confirmed it fails with the CSP stripped from the build and passes with it.
+- `style … fill:url(…)` was tried too; Mermaid's flowchart grammar rejects
+  `url(` there, so it is not in the check.

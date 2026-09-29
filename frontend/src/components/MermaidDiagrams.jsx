@@ -122,6 +122,11 @@ class Guard extends Component {
 
 function describe(error) {
   const message = (error && (error.message || error.str || String(error))) || 'unknown error'
+  // Mermaid's image shapes wait for the picture, which the page's content
+  // security policy refuses to fetch (index.html).
+  if (/image cannot be decoded/i.test(message)) {
+    return 'It links an image, and images named in model output are never loaded.'
+  }
   return message.trim()
 }
 

@@ -4,6 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
+    <!-- Model output is drawn as Mermaid diagrams, and Mermaid builds its SVG in
+         this page while it lays it out. The app itself loads no images, fonts
+         or media from anywhere but data: URLs, so nothing in a diagram may make
+         the browser fetch a URL, local or remote. Scripts are left to the
+         defaults so the Vite dev server keeps working. -->
+    <meta http-equiv="Content-Security-Policy"
+          content="img-src data: blob:; font-src data:; media-src 'none'; object-src 'none'; frame-src 'none'; style-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'none'" />
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23121722'/%3E%3Crect x='6' y='9' width='14' height='5' rx='2' fill='%23eda100'/%3E%3Crect x='11' y='18' width='15' height='5' rx='2' fill='%23eda100' opacity='.65'/%3E%3C/svg%3E" />
     <title>MITSS</title>
     <style>html { background: #0b0e14; }</style>
