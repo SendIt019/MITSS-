@@ -1337,3 +1337,18 @@ finished: exit 0 (or 1 with failed cells), the "finished" notification, and
 no resume command. Reporting "stopped" would point at a resume that only
 says "Nothing to resume". A test pins the behaviour, spec §5.4 says so, and
 Step 4's known-limits list must mention it.
+
+## 2026-09-29T14:23:01-05:00 — Step 2 review round 2: approved with fixes, one minor fixed
+
+Codex approved Step 2 with fixes (`docs/runner/reviews/step-2-round-2.md`).
+It did not raise the Ctrl-C-on-the-last-cell point again. The loop stops
+here, after round 2 of at most 3.
+
+- **Minor, fixed: failing to copy the manifest, results or summary left only
+  a console warning.** Such a failure is now a `copy_failed` event with a
+  `files` list and no `cell`, and the summary and `status` show it. The
+  manifest and results are copied before the summary is written, so their
+  failure appears in that same summary. The summary is copied last; if that
+  copy fails, the event is in `results.jsonl` and shows in `status` and the
+  next summary. A test fails only these copies (run-folder copies still
+  succeed) and checks all three places.

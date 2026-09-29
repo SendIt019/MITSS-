@@ -882,7 +882,9 @@ def tally(manifest: dict[str, Any], results: list[dict[str, Any]]) -> dict[str, 
                 bucket["seconds"] += seconds
             total["seconds"] += seconds
         if record.get("event") == "copy_failed":
-            notes.append(f"cell {record.get('cell')}: copy failed: {record.get('error')}")
+            what = (f"cell {record['cell']}" if "cell" in record
+                    else ", ".join(record.get("files") or ["matrix files"]))
+            notes.append(f"{what}: copy failed: {record.get('error')}")
     return {"per_model": per_model, "total": total, "failures": failures, "notes": notes}
 
 
@@ -1008,14 +1010,18 @@ class Session:
             self.append({"event": "copy_failed", "cell": cell["index"],
                          "run_id": run_id, "error": str(exc)})
 
-    def copy_own_files(self) -> str | None:
+    def copy_own_files(self, names: Sequence[str]) -> str | None:
+        """Copy the matrix run's own files outside the repo. A failure is
+        recorded as a copy_failed event, so the summary and status show it."""
         try:
             os.makedirs(self.manifest["copy_folder"], exist_ok=True)
-            for name in (MANIFEST, RESULTS, SUMMARY):
+            for name in names:
                 source = os.path.join(self.folder, name)
                 if os.path.exists(source):
                     shutil.copy2(source, os.path.join(self.manifest["copy_folder"], name))
         except OSError as exc:
+            self.append({"event": "copy_failed", "files": list(names),
+                         "error": str(exc)})
             return str(exc)
         return None
 
@@ -1116,13 +1122,18 @@ def finish_session(session: Session, outcome: str, reason: str,
             heading, code = "finished, every cell recorded", EXIT_OK
         else:
             heading, code = "finished with failed or skipped cells", EXIT_FAILED_CELLS
+        # Manifest and results first, so a failure to copy them is recorded
+        # and appears in this summary; the summary itself is copied last.
+        copy_error = session.copy_own_files((MANIFEST, RESULTS))
+        if copy_error:
+            results = read_results(session.folder)
         text = summary_text(session.manifest, results, heading, session.folder)
         path = os.path.join(session.folder, SUMMARY)
         with open(path, "a", encoding="utf-8") as handle:   # append-only too
             if handle.tell():
                 handle.write("\n" + "=" * 72 + "\n\n")
             handle.write(text)
-        copy_error = session.copy_own_files()
+        copy_error = session.copy_own_files((SUMMARY,)) or copy_error
         session.out("")
         session.out(text.rstrip())
         if copy_error:

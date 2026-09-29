@@ -313,6 +313,23 @@ class RunTests(_Base):
     def test_an_invalid_matrix_exits_three(self):
         self.assertEqual(self.start(FakeModel(self.root), versions=[9]), rm.EXIT_INVALID)
 
+    def test_a_failure_to_copy_the_matrix_files_is_recorded(self):
+        # Run folders copy fine (copytree); only the manifest/results/summary
+        # copy (copy2) fails.
+        with mock.patch.object(rm.shutil, "copy2", side_effect=OSError("disk full")):
+            code = self.start(FakeModel(self.root), versions=[1], inputs=[self.a])
+        self.assertEqual(code, rm.EXIT_OK)
+        failures = self.events("copy_failed")
+        self.assertEqual([f["files"] for f in failures],
+                         [[rm.MANIFEST, rm.RESULTS], [rm.SUMMARY]])
+        self.assertNotIn("cell", failures[0])
+        self.assertIn("manifest.json, results.jsonl: copy failed: disk full", self.summary())
+        copy = os.path.join(self.copies, self.only_run_id())
+        self.assertEqual(len(os.listdir(os.path.join(copy, "runs"))), 2)
+        self.assertFalse(os.path.exists(os.path.join(copy, rm.MANIFEST)))
+        self.assertIn("summary.txt: copy failed",
+                      "\n".join(rm.status_lines(self.only_run_id(), root=self.root)))
+
     def test_a_copy_failure_is_noted_not_fatal(self):
         blocker = os.path.join(self.copies, "not-a-folder")
         with open(blocker, "w", encoding="utf-8") as handle:
