@@ -1251,3 +1251,56 @@ stops here, after round 2 of at most 3.
   outside the sandbox; the results are in the step report. Codex also noted,
   correctly, that Step 1's "Done when" still needs Jake to apply the
   registrations and run `check` and `plan` on his Mac.
+
+## 2026-09-29T14:09:53-05:00 — Matrix runner Step 2: run, resume, status
+
+Jake said "both" to pushing `feat/matrix-runner` and to starting Step 2,
+knowing Step 1's own run of `check` and `plan` on his Mac was still to come.
+The branch was pushed first, which overrides "Don't push" in
+`.claude/rules/runner.md` this once, at his explicit request.
+
+`backend/run_matrix.py` now has `run`, `resume` and `status`, with 36 tests in
+`backend/tests/test_run_matrix_engine.py`. One of them records through the real
+`service.generate_run` against a stub server on 127.0.0.1. Choices the spec
+left open:
+
+- **Recording** goes through `service.generate_run` once per cell, as decided
+  at Step 0. Skips after an unavailable model are keyed by the served
+  `(url, model or name)`, as in `batch_generate`.
+- **Fatal stop:** a 503 (the stuck-server preflight) stops the matrix with
+  exit 2 instead of failing every later cell the same way. Other errors fail
+  their cell, and the matrix goes on.
+- **Unexpected errors** (a bug, a full disk) are logged with their traceback
+  through `logging` and still end in a summary and a "stopped" notification,
+  exit 2. That is the one broad `except Exception`, which ruff accepts because
+  the exception is logged.
+- **Ctrl-C:** a SIGINT handler lets the first press finish the current cell
+  and makes the second raise at once. SIGINT is ignored while the summary is
+  written, and the previous handler is put back afterwards.
+- **results.jsonl** is fsynced after every line. A line cut short by a hard
+  stop is skipped by the reader, and the next append starts on a fresh line.
+- **summary.txt is append-only too:** each `run` or `resume` appends a block,
+  so nothing in `data/matrices/` is rewritten. The manifest is opened with
+  "x" and can never be replaced.
+- **Resume checks only the cells still to run.** Their inputs are compared
+  with the manifest hash; a deleted input, or a model that is now
+  unregistered, quarantined, paste-only or not on loopback, is always refused.
+  A recorded cell froze its own texts, so a later edit to its input does not
+  block the rest. This narrows the spec's "each input" wording.
+- **Adoption** follows the 13:11 entry and Jake's Step 2 notes. Times are
+  compared as local time to the whole second, and a time with an offset is
+  converted to local time first. A run already claimed by another result line
+  (a repeat of the same cell) is never adopted. Tests cover the same second
+  (adopted), the second before (not adopted), and an offset timestamp.
+- **Copy folder:** each recorded run folder is copied as its cell finishes,
+  and the manifest, results and summary at the end of each session. A failed
+  copy is noted (`copy_failed`, summary Notes) and is never fatal, because
+  the run itself is safe in `data/`.
+- **Notifications:** finished uses "Glass" (spec); stopped uses "Basso", so the
+  two sound different. Both carry counts and the reason only.
+- **Declining the `run` prompt** exits 2 with nothing written, so a script
+  never reads a matrix that did not run as a success.
+
+The key tests (reconciliation, whole-second comparison, skipping, and the
+two-stage Ctrl-C) were each checked against a mutated engine in a scratch
+process; each failed as it should.

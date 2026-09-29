@@ -1,19 +1,21 @@
 """Run one prompt across versions x inputs x models, without anyone watching.
 
-Built in steps (docs/runner/RUNNER_SPEC.md). This file has `check` and `plan`;
-`run`, `resume` and `status` come in Step 2.
+Built in steps (docs/runner/RUNNER_SPEC.md). Start it through the wrapper,
+which loads backend/.env the way dev.sh does. This file never opens .env:
 
-Start it through the wrapper, which loads backend/.env the way dev.sh does.
-This file never opens .env itself:
-
-    scripts/run_matrix.sh check [--models ID[,ID...]]
-    scripts/run_matrix.sh plan MATRIX.json [--models ID[,ID...]]
+    scripts/run_matrix.sh check  [--models ID[,ID...]]
+    scripts/run_matrix.sh plan   MATRIX.json [--models ID[,ID...]]
+    scripts/run_matrix.sh run    MATRIX.json [--models ID[,ID...]] [--yes]
+    scripts/run_matrix.sh resume MATRIX_RUN_ID [--allow-changed-inputs]
+    scripts/run_matrix.sh status [MATRIX_RUN_ID]
 
 Exit codes: 0 all good - 1 finished with failed or skipped cells - 2 stopped
 early - 3 validation or preflight error.
 
 Standard library only, and it must run on Python 3.9 (CI runs the core there).
-Runs are recorded only through app.service; nothing here writes to data/.
+Runs are recorded only through app.service. The runner's own files (the
+manifest, results.jsonl and summary.txt, all append-only) live in
+data/matrices/<matrix_run_id>/; nothing else in data/ is written here.
 """
 
 from __future__ import annotations
@@ -21,16 +23,20 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import logging
 import math
 import os
 import shutil
+import signal
 import socket
 import statistics
 import subprocess
 import sys
+import time
 import urllib.parse
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Callable, Optional
 
 from app import service
@@ -49,7 +55,7 @@ from pipeline import NotFound, Store
 
 # The store's own id alphabet, so a name that passes here is safe as a
 # directory name for the same reason a run id is.
-from pipeline.store import _SAFE_ID, text_sha256
+from pipeline.store import _SAFE_ID, now, stamp, text_sha256
 
 EXIT_OK = 0
 EXIT_FAILED_CELLS = 1
@@ -62,9 +68,9 @@ LINEUP = ("llama-3-1-8b", "qwen3-8-27b", "gemma-4-26b-a4b")
 
 MAX_REPEATS = 10
 MATRIX_KEYS = ("name", "prompt_id", "versions", "inputs", "models", "repeats")
-# A matrix run id is "<YYYYMMDD-HHMMSS>-<name>" and must fit the store's
-# 128-character id limit.
-MAX_NAME = 128 - len("20260929-141500-")
+# A matrix run id is "<YYYYMMDD-HHMMSS>-<name>", plus "-N" when two start in
+# the same second, and must fit the store's 128-character id limit.
+MAX_NAME = 128 - len("20260929-141500-") - len("-999")
 
 MIB = 1024 ** 2
 GIB = 1024 ** 3
@@ -699,6 +705,671 @@ def check(model_ids: Sequence[str] = LINEUP, root: str | None = None,
 
 
 # --------------------------------------------------------------------------
+# a matrix run's own files: manifest, results.jsonl, summary.txt
+# --------------------------------------------------------------------------
+
+MANIFEST = "manifest.json"
+RESULTS = "results.jsonl"
+SUMMARY = "summary.txt"
+FINAL = ("recorded", "failed", "skipped")
+
+
+def matrices_dir(root: str | None = None) -> str:
+    return os.path.join(read_store(root).data_dir, "matrices")
+
+
+def matrix_dir(matrix_run_id: str, root: str | None = None) -> str:
+    # Checked before it touches a path, like every other id.
+    if not _is_safe_id(matrix_run_id):
+        raise MatrixError([f"not a matrix run id: {matrix_run_id!r}"])
+    return os.path.join(matrices_dir(root), matrix_run_id)
+
+
+def new_matrix_run_id(name: str, root: str | None = None) -> str:
+    base = f"{stamp()}-{name}"
+    candidate, counter = base, 2
+    while os.path.exists(os.path.join(matrices_dir(root), candidate)):
+        candidate = f"{base}-{counter}"
+        counter += 1
+    return candidate
+
+
+def build_manifest(plan: Plan, matrix_run_id: str, copy_folder: str,
+                   only: Sequence[str] | None) -> dict[str, Any]:
+    """Everything resume needs, fixed before the first call."""
+    matrix = plan.matrix
+    keep = ("id", "name", "url", "model", "settings")   # never key_env
+    return {
+        "matrix_run_id": matrix_run_id,
+        "created_at": now(),
+        "matrix": {"name": matrix.name, "prompt_id": matrix.prompt_id,
+                   "versions": matrix.versions, "inputs": matrix.inputs,
+                   "models": matrix.models, "repeats": matrix.repeats},
+        "only_models": list(only) if only else None,
+        "copy_folder": copy_folder,
+        "inputs": plan.inputs,
+        "models": [{k: e[k] for k in keep} for e in plan.models],
+        "cells": [c.to_dict() for c in plan.cells],
+    }
+
+
+def write_manifest(folder: str, manifest: dict[str, Any]) -> None:
+    os.makedirs(folder, exist_ok=True)
+    # "x": written once, never replaced.
+    with open(os.path.join(folder, MANIFEST), "x", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2)
+        handle.write("\n")
+
+
+def read_manifest(folder: str) -> dict[str, Any]:
+    try:
+        with open(os.path.join(folder, MANIFEST), encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise MatrixError([f"no readable matrix run at {folder}: {exc}"]) from None
+
+
+def append_result(folder: str, record: dict[str, Any]) -> None:
+    """Append one line to results.jsonl and make it durable.
+
+    A line cut short by a hard stop is closed off first, so the new record
+    never runs into it; the reader skips the broken line.
+    """
+    data = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+    with open(os.path.join(folder, RESULTS), "ab+") as handle:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell():
+            handle.seek(-1, os.SEEK_END)
+            if handle.read(1) != b"\n":
+                data = b"\n" + data
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def read_results(folder: str) -> list[dict[str, Any]]:
+    path = os.path.join(folder, RESULTS)
+    if not os.path.exists(path):
+        return []
+    records = []
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue            # a line cut short by a hard stop
+            if isinstance(record, dict):
+                records.append(record)
+    return records
+
+
+def cell_states(results: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """Each cell's latest state. A recorded cell stays recorded."""
+    states: dict[int, dict[str, Any]] = {}
+    for record in results:
+        cell = record.get("cell")
+        event = record.get("event")
+        if not isinstance(cell, int) or event not in ("started",) + FINAL:
+            continue
+        state = states.setdefault(cell, {})
+        if state.get("event") == "recorded":
+            continue
+        if event == "started":
+            state["started_at"] = record.get("at")
+        state["event"] = event
+        state["record"] = record
+    return states
+
+
+def _moment(stamp_text: str) -> datetime:
+    """A store timestamp as local time to the whole second, for comparing."""
+    moment = datetime.fromisoformat(stamp_text)
+    if moment.tzinfo is not None:
+        moment = moment.astimezone().replace(tzinfo=None)
+    return moment.replace(microsecond=0)
+
+
+# --------------------------------------------------------------------------
+# summary and notifications
+# --------------------------------------------------------------------------
+
+def format_elapsed(seconds: float) -> str:
+    seconds = round(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m{seconds:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m"
+
+
+def tally(manifest: dict[str, Any], results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Counts per model and in total, from the manifest and results alone."""
+    states = cell_states(results)
+    names = {m["id"]: m["name"] for m in manifest["models"]}
+    per_model: dict[str, dict[str, Any]] = {}
+    total = {"cells": 0, "recorded": 0, "failed": 0, "skipped": 0,
+             "truncated": 0, "not_run": 0, "seconds": 0.0}
+    failures, notes = [], []
+    for cell in manifest["cells"]:
+        counts = per_model.setdefault(cell["model_id"], {
+            "name": names.get(cell["model_id"], cell["model_id"]), "cells": 0,
+            "recorded": 0, "failed": 0, "skipped": 0, "truncated": 0,
+            "not_run": 0, "seconds": 0.0})
+        state = states.get(cell["index"], {})
+        event = state.get("event")
+        kind = event if event in FINAL else "not_run"
+        for bucket in (counts, total):
+            bucket["cells"] += 1
+            bucket[kind] += 1
+        record = state.get("record") or {}
+        if kind == "recorded" and record.get("truncated"):
+            counts["truncated"] += 1
+            total["truncated"] += 1
+        if kind in ("failed", "skipped"):
+            failures.append(f"cell {cell['index']} {describe_cell(cell, names)}: "
+                            f"{kind}: {record.get('error') or record.get('reason')}")
+        if record.get("adopted") and not record.get("index_event"):
+            notes.append(f"cell {cell['index']}: run {record.get('run_id')} was "
+                         "adopted but has no run_recorded event in index.jsonl "
+                         "(not repaired)")
+    for record in results:
+        if record.get("event") in ("recorded", "failed") and not record.get("adopted"):
+            seconds = (record.get("elapsed_ms") or 0) / 1000
+            bucket = per_model.get(_cell_model(manifest, record.get("cell")))
+            if bucket is not None:
+                bucket["seconds"] += seconds
+            total["seconds"] += seconds
+        if record.get("event") == "copy_failed":
+            notes.append(f"cell {record.get('cell')}: copy failed: {record.get('error')}")
+    return {"per_model": per_model, "total": total, "failures": failures, "notes": notes}
+
+
+def _cell_model(manifest: dict[str, Any], index: Any) -> str | None:
+    for cell in manifest["cells"]:
+        if cell["index"] == index:
+            return cell["model_id"]
+    return None
+
+
+def describe_cell(cell: dict[str, Any], names: dict[str, str]) -> str:
+    text = (f"{names.get(cell['model_id'], cell['model_id'])} "
+            f"v{cell['version']} × {cell['input_id']}")
+    return text + (f" r{cell['repeat']}" if cell.get("repeat", 1) > 1 else "")
+
+
+def resume_command(matrix_run_id: str) -> str:
+    return f"scripts/run_matrix.sh resume {matrix_run_id}"
+
+
+def summary_text(manifest: dict[str, Any], results: list[dict[str, Any]],
+                 heading: str, folder: str) -> str:
+    counts = tally(manifest, results)
+    matrix = manifest["matrix"]
+    lines = [
+        f"MITSS matrix {manifest['matrix_run_id']}: {heading}",
+        (f"Written {now()}. Prompt {matrix['prompt_id']}, versions "
+         f"{', '.join(map(str, matrix['versions']))}, inputs "
+         f"{', '.join(matrix['inputs'])}, repeats {matrix['repeats']}."),
+        "",
+    ]
+    for bucket in counts["per_model"].values():
+        lines.append(_count_line(bucket["name"], bucket))
+    lines.append(_count_line("Total", counts["total"]))
+    if counts["failures"]:
+        lines += ["", "Failed or skipped:"] + [f"  {f}" for f in counts["failures"]]
+    if counts["notes"]:
+        lines += ["", "Notes:"] + [f"  {n}" for n in counts["notes"]]
+    lines += ["", f"Matrix folder: {folder}",
+              f"Copy folder:   {manifest['copy_folder']}"]
+    if counts["total"]["recorded"] < counts["total"]["cells"]:
+        lines.append(f"Resume:        {resume_command(manifest['matrix_run_id'])}")
+    return "\n".join(lines) + "\n"
+
+
+def _count_line(label: str, bucket: dict[str, Any]) -> str:
+    parts = [f"recorded {bucket['recorded']}/{bucket['cells']}",
+             f"failed {bucket['failed']}", f"skipped {bucket['skipped']}",
+             f"truncated {bucket['truncated']}"]
+    if bucket["not_run"]:
+        parts.append(f"not run {bucket['not_run']}")
+    parts.append(format_elapsed(bucket["seconds"]))
+    return f"  {label}: " + " · ".join(parts)
+
+
+def notification_body(total: dict[str, Any], seconds: float) -> str:
+    """Counts only. Never prompt, input or output text."""
+    parts = [f"{total['recorded']} recorded", f"{total['failed']} failed"]
+    if total["skipped"]:
+        parts.append(f"{total['skipped']} skipped")
+    parts += [f"{total['truncated']} truncated", format_elapsed(seconds)]
+    return " · ".join(parts)
+
+
+# --------------------------------------------------------------------------
+# the engine
+# --------------------------------------------------------------------------
+
+class Interrupts:
+    """Ctrl-C handling while a matrix runs.
+
+    The first Ctrl-C lets the current cell finish and record, then stops.
+    The second raises KeyboardInterrupt at once, abandoning the request in
+    flight; resume reconciles that cell from its `started` line.
+    """
+
+    def __init__(self, out: Callable[[str], None]):
+        self.out = out
+        self.requested = False
+        self._previous: Any = None
+
+    def __call__(self, signum: int, frame: Any) -> None:
+        if self.requested:
+            raise KeyboardInterrupt
+        self.requested = True
+        self.out("Ctrl-C: stopping after this cell. Press Ctrl-C again to stop now.")
+
+    def install(self) -> None:
+        self._previous = signal.signal(signal.SIGINT, self)
+
+    def restore(self) -> None:
+        signal.signal(signal.SIGINT, self._previous)
+
+
+@dataclass
+class Session:
+    """One `run` or `resume` of a matrix run."""
+
+    folder: str
+    manifest: dict[str, Any]
+    root: str | None = None
+    call: Callable[..., dict[str, Any]] = service.generate_run
+    run: Runner = run_command
+    out: Callable[[str], None] = print
+    interrupts: Interrupts | None = None
+
+    @property
+    def matrix_run_id(self) -> str:
+        return self.manifest["matrix_run_id"]
+
+    def append(self, record: dict[str, Any]) -> None:
+        record.setdefault("at", now())
+        append_result(self.folder, record)
+
+    def copy_run(self, cell: dict[str, Any], run_id: str) -> None:
+        """Copy a recorded run folder outside the repo; a failure is noted,
+        never fatal - the run itself is safe in data/."""
+        target = os.path.join(self.manifest["copy_folder"], "runs", run_id)
+        try:
+            shutil.copytree(read_store(self.root).run_dir(run_id), target,
+                            dirs_exist_ok=True)
+        except (OSError, NotFound) as exc:
+            self.append({"event": "copy_failed", "cell": cell["index"],
+                         "run_id": run_id, "error": str(exc)})
+
+    def copy_own_files(self) -> str | None:
+        try:
+            os.makedirs(self.manifest["copy_folder"], exist_ok=True)
+            for name in (MANIFEST, RESULTS, SUMMARY):
+                source = os.path.join(self.folder, name)
+                if os.path.exists(source):
+                    shutil.copy2(source, os.path.join(self.manifest["copy_folder"], name))
+        except OSError as exc:
+            return str(exc)
+        return None
+
+
+def _tag(cell: dict[str, Any], manifest: dict[str, Any]) -> str:
+    same_model = [c for c in manifest["cells"] if c["model_id"] == cell["model_id"]]
+    position = same_model.index(cell) + 1
+    text = (f"[{cell['model']} {position}/{len(same_model)}] "
+            f"v{cell['version']} × {cell['input_id']}")
+    return text + (f" r{cell['repeat']}" if manifest["matrix"]["repeats"] > 1 else "")
+
+
+def execute(session: Session, cells: list[dict[str, Any]]) -> tuple[str, str]:
+    """Run cells in manifest order. Returns ("finished" | "stopped", reason)."""
+    manifest = session.manifest
+    models = {m["id"]: m for m in manifest["models"]}
+    unavailable: dict[tuple, str] = {}
+    for cell in cells:
+        if session.interrupts is not None and session.interrupts.requested:
+            return "stopped", "stopped by Ctrl-C after the cell in progress"
+        entry = models[cell["model_id"]]
+        # The same key batch_generate uses: what the server is asked to load.
+        served = (entry["url"], served_model(entry))
+        tag = _tag(cell, manifest)
+        if served in unavailable:
+            session.append({"event": "skipped", "cell": cell["index"],
+                            "reason": unavailable[served]})
+            session.out(f"{tag} … skipped: {unavailable[served]}")
+            continue
+
+        session.append({"event": "started", "cell": cell["index"]})
+        started = time.monotonic()
+        try:
+            run = session.call(manifest["matrix"]["prompt_id"], cell["version"],
+                               input_id=cell["input_id"], model_id=cell["model_id"],
+                               root=session.root)
+        except service.ServiceError as exc:
+            elapsed = int((time.monotonic() - started) * 1000)
+            session.append({"event": "failed", "cell": cell["index"],
+                            "error": exc.message, "status": exc.status,
+                            "elapsed_ms": elapsed})
+            session.out(f"{tag} … FAILED {elapsed / 1000:.1f} s: {exc.message}")
+            if exc.unavailable:
+                unavailable[served] = exc.message
+            if exc.status == 503:
+                # A stuck server fails every later cell the same way.
+                return "stopped", f"the model server is stuck: {exc.message}"
+            continue
+        elapsed = int((time.monotonic() - started) * 1000)
+        finish = (run.get("usage") or {}).get("finish_reason")
+        truncated = finish == "length"
+        session.append({"event": "recorded", "cell": cell["index"],
+                        "run_id": run["id"], "finish_reason": finish,
+                        "truncated": truncated, "elapsed_ms": elapsed})
+        session.out(f"{tag} … recorded {elapsed / 1000:.1f} s"
+                    + ("  TRUNCATED" if truncated else ""))
+        session.copy_run(cell, run["id"])
+    return "finished", ""
+
+
+def run_session(session: Session, cells: list[dict[str, Any]], action: str) -> int:
+    """Run cells, then always write the summary and notify, however it ends."""
+    started = time.monotonic()
+    session.append({"event": "session", "action": action})
+    outcome, reason = "stopped", ""
+    session.interrupts = Interrupts(session.out)
+    session.interrupts.install()
+    try:
+        outcome, reason = execute(session, cells)
+    except KeyboardInterrupt:
+        outcome, reason = "stopped", "stopped at once by a second Ctrl-C"
+    except Exception as exc:
+        # A bug or a full disk must still leave a summary and a notification.
+        logging.getLogger(__name__).exception("matrix stopped by an unexpected error")
+        outcome, reason = "stopped", f"stopped by an unexpected error: {exc!r}"
+    finally:
+        session.interrupts.restore()
+        session.interrupts = None
+    return finish_session(session, outcome, reason, time.monotonic() - started)
+
+
+def finish_session(session: Session, outcome: str, reason: str,
+                   seconds: float) -> int:
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)   # let it finish
+    try:
+        session.append({"event": "session_end", "outcome": outcome, "reason": reason})
+        results = read_results(session.folder)
+        total = tally(session.manifest, results)["total"]
+        complete = total["recorded"] == total["cells"]
+        if outcome == "stopped":
+            heading, code = f"stopped - {reason}", EXIT_STOPPED
+        elif complete:
+            heading, code = "finished, every cell recorded", EXIT_OK
+        else:
+            heading, code = "finished with failed or skipped cells", EXIT_FAILED_CELLS
+        text = summary_text(session.manifest, results, heading, session.folder)
+        path = os.path.join(session.folder, SUMMARY)
+        with open(path, "a", encoding="utf-8") as handle:   # append-only too
+            if handle.tell():
+                handle.write("\n" + "=" * 72 + "\n\n")
+            handle.write(text)
+        copy_error = session.copy_own_files()
+        session.out("")
+        session.out(text.rstrip())
+        if copy_error:
+            session.out(f"WARNING: the copy folder was not updated: {copy_error}")
+
+        if outcome == "stopped":
+            session.run(notification_command(
+                "MITSS matrix stopped",
+                f"{reason[:120]}. Resume: {resume_command(session.matrix_run_id)}",
+                sound="Basso"))
+        else:
+            session.run(notification_command("MITSS matrix finished",
+                                             notification_body(total, seconds)))
+        return code
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+# --------------------------------------------------------------------------
+# run, resume, status
+# --------------------------------------------------------------------------
+
+def preflight(models: list[dict[str, Any]], root: str | None, copy_folder: str,
+              run: Runner, listening: Callable[[str], bool | None]
+              ) -> tuple[list[str], list[str]]:
+    """(problems, warnings) before any call. No model is touched."""
+    problems, warnings = [], []
+    for url in dict.fromkeys(m["url"] for m in models):
+        if not listening(url):
+            problems.append(f"the model server is not listening at {url}; start "
+                            "it first: scripts/start_model_server.sh")
+    memory = read_memory(run)
+    for entry in models:
+        folder = resolve_model_path(served_model(entry))
+        try:
+            check_model_folder(folder)
+        except LLMModelUnavailable as exc:
+            problems.append(f"{entry['name']}: {exc}")
+            continue
+        warning = memory_warning(weights_bytes(folder), memory.limit, memory.ram)
+        if warning:
+            warnings.append(f"{entry['name']}: {warning}")
+    for label, path in (("data root", read_store(root).data_dir),
+                        ("copy folder", copy_folder)):
+        free = free_bytes(path)
+        if free is not None and free < LOW_DISK:
+            warnings.append(f"less than {gib(LOW_DISK)} free for the {label}")
+    return problems, warnings
+
+
+def _print_findings(out: Callable[[str], None], problems: list[str],
+                    warnings: list[str]) -> None:
+    for warning in warnings:
+        out(f"WARNING: {warning}")
+    for problem in problems:
+        out(f"PROBLEM: {problem}")
+
+
+def _ask(prompt: str) -> str:
+    try:
+        return input(prompt)
+    except (EOFError, KeyboardInterrupt):
+        return ""
+
+
+def start_matrix(matrix_path: str, only: Sequence[str] | None = None,
+                 yes: bool = False, root: str | None = None,
+                 copy_root: str = COPY_ROOT,
+                 call: Callable[..., dict[str, Any]] = service.generate_run,
+                 run: Runner = run_command,
+                 listening: Callable[[str], bool | None] = server_listening,
+                 ask: Callable[[str], str] = _ask,
+                 out: Callable[[str], None] = print) -> int:
+    """`run`: plan, preflight, confirm, write the manifest, run every cell."""
+    try:
+        plan = build_plan(load_matrix(matrix_path), only, root=root)
+    except MatrixError as exc:
+        out(f"Matrix refused ({len(exc.problems)} problem(s)):")
+        for problem in exc.problems:
+            out(f"  - {problem}")
+        return EXIT_INVALID
+    out(format_plan(plan, {e["id"]: estimate_cell_seconds(e, root) for e in plan.models}))
+
+    matrix_run_id = new_matrix_run_id(plan.matrix.name, root)
+    copy_folder = os.path.join(os.path.expanduser(copy_root), matrix_run_id)
+    problems, warnings = preflight(plan.models, root, copy_folder, run, listening)
+    out("")
+    _print_findings(out, problems, warnings)
+    if problems:
+        return EXIT_INVALID
+    if not yes and not _ask_yes(ask, f"Run {len(plan.cells)} cells as {matrix_run_id}? [y/N] "):
+        out("Not started.")
+        return EXIT_STOPPED
+
+    folder = matrix_dir(matrix_run_id, root)
+    manifest = build_manifest(plan, matrix_run_id, copy_folder, only)
+    write_manifest(folder, manifest)
+    out(f"Matrix run {matrix_run_id}: {folder}")
+    session = Session(folder, manifest, root, call, run, out)
+    return run_session(session, manifest["cells"], "run")
+
+
+def _ask_yes(ask: Callable[[str], str], prompt: str) -> bool:
+    return ask(prompt).strip().lower() in ("y", "yes")
+
+
+def reconcile(session: Session, cells: list[dict[str, Any]],
+              states: dict[int, dict[str, Any]]) -> int:
+    """Adopt runs recorded by cells that were interrupted before their
+    result line was written. Returns how many were adopted.
+
+    The run folder is the record (store.create_run writes it before the
+    transcript and the index event), so this looks in the run folders.
+    Read-only: a missing index event is reported, never written.
+    """
+    shelf = read_store(session.root)
+    claimed = {s["record"]["run_id"] for s in states.values()
+               if s.get("event") == "recorded"}
+    events: list[dict[str, Any]] | None = None
+    adopted = 0
+    for cell in cells:
+        state = states.get(cell["index"], {})
+        if state.get("event") != "started" or not state.get("started_at"):
+            continue
+        since = _moment(state["started_at"])
+        candidates = [
+            r for r in shelf.list_runs(session.manifest["matrix"]["prompt_id"],
+                                       cell["version"], cell["model"], cell["input_id"])
+            if r.id not in claimed and r.created_at and _moment(r.created_at) >= since
+        ]
+        if not candidates:
+            continue
+        run = min(candidates, key=lambda r: (_moment(r.created_at), r.id))
+        if events is None:
+            events = shelf.read_events()
+        indexed = any(e.get("event") == "run_recorded" and e.get("run_id") == run.id
+                      for e in events)
+        finish = (run.usage or {}).get("finish_reason")
+        session.append({"event": "recorded", "cell": cell["index"], "run_id": run.id,
+                        "finish_reason": finish, "truncated": finish == "length",
+                        "elapsed_ms": run.duration_ms, "adopted": True,
+                        "index_event": indexed})
+        session.out(f"{_tag(cell, session.manifest)} … adopted {run.id}"
+                    + ("" if indexed else " (no index.jsonl event)"))
+        claimed.add(run.id)
+        adopted += 1
+        session.copy_run(cell, run.id)
+    return adopted
+
+
+def resume_matrix(matrix_run_id: str, allow_changed_inputs: bool = False,
+                  root: str | None = None,
+                  call: Callable[..., dict[str, Any]] = service.generate_run,
+                  run: Runner = run_command,
+                  listening: Callable[[str], bool | None] = server_listening,
+                  out: Callable[[str], None] = print) -> int:
+    """`resume`: adopt interrupted cells, then run every unrecorded cell."""
+    try:
+        folder = matrix_dir(matrix_run_id, root)
+        manifest = read_manifest(folder)
+    except MatrixError as exc:
+        out(f"Cannot resume: {exc.problems[0]}")
+        return EXIT_INVALID
+    states = cell_states(read_results(folder))
+    pending = [c for c in manifest["cells"]
+               if states.get(c["index"], {}).get("event") != "recorded"]
+    if not pending:
+        out(f"Nothing to resume: every cell of {matrix_run_id} is recorded.")
+        return EXIT_OK
+
+    problems = _resume_problems(manifest, pending, allow_changed_inputs, root)
+    if problems:
+        out(f"Resume refused ({len(problems)} problem(s)):")
+        for problem in problems:
+            out(f"  - {problem}")
+        return EXIT_INVALID
+
+    session = Session(folder, manifest, root, call, run, out)
+    session.append({"event": "session", "action": "reconcile"})
+    reconcile(session, pending, states)
+    states = cell_states(read_results(folder))
+    pending = [c for c in pending
+               if states.get(c["index"], {}).get("event") != "recorded"]
+    if not pending:
+        return finish_session(session, "finished", "", 0.0)
+
+    shelf = read_store(root)
+    models = [registration(shelf, m) for m in dict.fromkeys(c["model_id"] for c in pending)]
+    problems, warnings = preflight(models, root, manifest["copy_folder"], run, listening)
+    _print_findings(out, problems, warnings)
+    if problems:
+        return EXIT_INVALID
+    out(f"Resuming {matrix_run_id}: {len(pending)} cell(s) to run.")
+    return run_session(session, pending, "resume")
+
+
+def _resume_problems(manifest: dict[str, Any], pending: list[dict[str, Any]],
+                     allow_changed_inputs: bool, root: str | None) -> list[str]:
+    """Inputs that changed or vanished, and models that can no longer run.
+
+    Only the inputs and models of cells still to run are checked: a
+    recorded cell froze its own texts when it was recorded.
+    """
+    shelf = read_store(root)
+    problems = []
+    for input_id in dict.fromkeys(c["input_id"] for c in pending):
+        try:
+            current = text_sha256(shelf.get_input(input_id).text)
+        except NotFound:
+            problems.append(f"input '{input_id}' no longer exists")
+            continue
+        if current != manifest["inputs"][input_id]["sha256"] and not allow_changed_inputs:
+            problems.append(f"input '{input_id}' changed since the matrix was "
+                            "planned (use --allow-changed-inputs to run it as it is now)")
+    for model_id in dict.fromkeys(c["model_id"] for c in pending):
+        try:
+            refusal = refuse_model(registration(shelf, model_id))
+        except NotFound:
+            refusal = "is no longer registered"
+        if refusal:
+            problems.append(f"model '{model_id}' {refusal}")
+    return problems
+
+
+def status_lines(matrix_run_id: str | None = None, root: str | None = None) -> list[str]:
+    if matrix_run_id:
+        folder = matrix_dir(matrix_run_id, root)
+        manifest = read_manifest(folder)
+        return summary_text(manifest, read_results(folder), "status",
+                            folder).rstrip().split("\n")
+    base = matrices_dir(root)
+    names = sorted(n for n in os.listdir(base) if _is_safe_id(n)) \
+        if os.path.isdir(base) else []
+    if not names:
+        return ["No matrix runs yet."]
+    lines = []
+    for name in names:
+        folder = os.path.join(base, name)
+        try:
+            manifest = read_manifest(folder)
+        except MatrixError:
+            continue
+        results = read_results(folder)
+        total = tally(manifest, results)["total"]
+        ends = [r for r in results if r.get("event") == "session_end"]
+        last = ends[-1]["outcome"] if ends else "running or interrupted"
+        lines.append(f"{name}  {total['recorded']}/{total['cells']} recorded  "
+                     f"{total['failed']} failed  {total['skipped']} skipped  ({last})")
+    return lines
+
+
+# --------------------------------------------------------------------------
 # command line
 # --------------------------------------------------------------------------
 
@@ -724,6 +1395,17 @@ def _parser() -> argparse.ArgumentParser:
     plan_cmd.add_argument("matrix", help="path to the matrix JSON file")
     plan_cmd.add_argument("--models", type=_model_list, default=None,
                           help="only these of the matrix's models")
+    run_cmd = sub.add_parser("run", help="run every cell of a matrix file")
+    run_cmd.add_argument("matrix", help="path to the matrix JSON file")
+    run_cmd.add_argument("--models", type=_model_list, default=None,
+                         help="only these of the matrix's models")
+    run_cmd.add_argument("--yes", action="store_true", help="start without asking")
+    resume_cmd = sub.add_parser("resume", help="finish an interrupted matrix run")
+    resume_cmd.add_argument("matrix_run_id")
+    resume_cmd.add_argument("--allow-changed-inputs", action="store_true",
+                            help="run cells whose input changed since planning")
+    status_cmd = sub.add_parser("status", help="list matrix runs, or show one")
+    status_cmd.add_argument("matrix_run_id", nargs="?")
     return parser
 
 
@@ -733,6 +1415,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = check(args.models)
         print("\n".join(report.lines))
         return EXIT_INVALID if report.problems else EXIT_OK
+    if args.command == "run":
+        return start_matrix(args.matrix, args.models, args.yes)
+    if args.command == "resume":
+        return resume_matrix(args.matrix_run_id, args.allow_changed_inputs)
+    if args.command == "status":
+        try:
+            print("\n".join(status_lines(args.matrix_run_id)))
+        except MatrixError as exc:
+            print(exc.problems[0], file=sys.stderr)
+            return EXIT_INVALID
+        return EXIT_OK
 
     try:
         plan = build_plan(load_matrix(args.matrix), args.models)
