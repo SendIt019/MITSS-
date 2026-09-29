@@ -501,6 +501,60 @@ class ReviewFixTests(_DataRoot):
         self.assertEqual(snapshot(), before)
 
 
+class RoundTwoTests(_DataRoot):
+    """Codex's Step 1 round 2: invalid ports, and the model-name fallback."""
+
+    def fake_run(self):
+        return _runner({"hw.memsize": str(24 * rm.GIB), "iogpu.wired_limit_mb": "0",
+                        "metal": str(20 * rm.GIB)})
+
+    def test_invalid_ports_are_refused_not_crashed_on(self):
+        for url in ("http://127.0.0.1:abc/v1/chat/completions",
+                    "http://127.0.0.1:70000/v1/chat/completions",
+                    "http://localhost:-1/v1"):
+            with self.subTest(url=url):
+                service.update_model(self.fast, url=url, root=self.root)
+                with self.assertRaises(rm.MatrixError) as caught:
+                    rm.build_plan(self.matrix(models=[self.fast]), root=self.root)
+                self.assertIn("invalid port", caught.exception.problems[0])
+                probed = []
+                report = rm.check([self.fast], root=self.root, run=self.fake_run(),
+                                  listening=lambda u, seen=probed: seen.append(u) or True)
+                self.assertEqual(report.problems, 1)
+                self.assertIn("invalid port", "\n".join(report.lines))
+                self.assertEqual(probed, [])
+                self.assertFalse(rm.server_listening(url))
+
+    def test_a_bad_port_through_the_command_line_exits_three(self):
+        service.update_model(self.fast, url="http://127.0.0.1:abc/v1", root=self.root)
+        with mock.patch.object(rm, "run_command", self.fake_run()), \
+                mock.patch.dict(os.environ, {"MITSS_ROOT": self.root}), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(rm.main(["check", "--models", self.fast]), rm.EXIT_INVALID)
+
+    def test_ports_and_defaults(self):
+        self.assertEqual(rm.url_port("http://127.0.0.1:8080/v1"), 8080)
+        self.assertEqual(rm.url_port("http://localhost/v1"), 80)
+        self.assertEqual(rm.url_port("https://[::1]/v1"), 443)
+        self.assertIsNone(rm.url_port("http://127.0.0.1:99999/v1"))
+
+    def test_an_empty_model_field_falls_back_to_the_name(self):
+        self.assertEqual(rm.served_model({"model": "", "name": "llama-3.1-8b"}),
+                         "llama-3.1-8b")
+        self.assertEqual(rm.served_model({"model": "/m/x", "name": "x-label"}), "/m/x")
+        # Through the store the summary already fills it in; check agrees.
+        with tempfile.TemporaryDirectory() as models:
+            os.makedirs(os.path.join(models, "fast-8b"))
+            with open(os.path.join(models, "fast-8b", "config.json"), "w",
+                      encoding="utf-8") as handle:
+                json.dump({}, handle)
+            with mock.patch.dict(os.environ, {"MITSS_MODELS_DIR": models}):
+                report = rm.check([self.fast], root=self.root, run=self.fake_run(),
+                                  listening=lambda u: True)
+        self.assertIn(os.path.join(models, "fast-8b"), "\n".join(report.lines))
+        self.assertEqual(report.problems, 0)
+
+
 class CommandLineTests(_DataRoot):
     def main(self, *argv):
         out, err = io.StringIO(), io.StringIO()

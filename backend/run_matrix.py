@@ -326,7 +326,24 @@ def refuse_model(entry: dict[str, Any]) -> str | None:
         # beyond this machine's model server.
         return (f"is not on this machine ({entry['url']}); the runner only "
                 "calls loopback endpoints (127.0.0.1, localhost, ::1)")
+    if url_port(entry["url"]) is None:
+        return f"has a url with an invalid port ({entry['url']})"
     return None
+
+
+def url_port(url: str) -> int | None:
+    """The port a url names (or its scheme's default), None if it is invalid."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        return parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError:      # not a number, or outside 0-65535
+        return None
+
+
+def served_model(entry: dict[str, Any]) -> str:
+    """What the request body names: the model field, else the name, as the
+    service's provider does (`model=entry.model or entry.name`)."""
+    return entry.get("model") or entry["name"]
 
 
 def _max_tokens(entry: dict[str, Any]) -> int:
@@ -519,10 +536,11 @@ def server_listening(url: str, timeout: float = 2.0) -> bool | None:
     """
     if not is_local_url(url):
         return None
-    parts = urllib.parse.urlsplit(url)
-    port = parts.port or (443 if parts.scheme == "https" else 80)
+    port = url_port(url)
+    if port is None:
+        return False
     try:
-        with socket.create_connection((parts.hostname, port), timeout=timeout):
+        with socket.create_connection((urllib.parse.urlsplit(url).hostname, port), timeout=timeout):
             return True
     except OSError:
         return False
@@ -598,10 +616,11 @@ def _check_model(report: Report, model_id: str, memory: Memory,
     refusal = refuse_model(entry)
     if refusal:
         report.problem(refusal)
-        if not entry["callable"] or not is_local_url(entry["url"]):
-            return None
+        if not entry["callable"] or not is_local_url(entry["url"]) \
+                or url_port(entry["url"]) is None:
+            return None     # nothing on this machine to look at or probe
 
-    folder = resolve_model_path(entry["model"])
+    folder = resolve_model_path(served_model(entry))
     try:
         check_model_folder(folder)
     except LLMModelUnavailable as exc:

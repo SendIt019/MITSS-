@@ -1224,3 +1224,30 @@ itself with `codex exec --sandbox read-only`, saves every review verbatim to
 to ask Jake about any finding it disagrees with. At most 3 rounds per step;
 it stops when Codex approves. It never starts the next step or runs anything
 that needs a live model. The procedure is `docs/runner/REVIEW_LOOP.md`.
+
+## 2026-09-29T13:45:33-05:00 — Step 1 review round 2: approved with fixes, two minors fixed
+
+Codex, run read-only by Claude Code (`docs/runner/reviews/step-1-round-2.md`),
+approved Step 1 with fixes and gave two minors. Both were fixed, so the loop
+stops here, after round 2 of at most 3.
+
+- **Invalid URL port.** `service` only checks that a URL starts with
+  http:// or https://, so a registration could hold `:abc` or `:70000`.
+  `check` crashed on it with an uncaught `ValueError`. Now `refuse_model` also
+  refuses a URL whose port is not a number from 0 to 65535. `plan` refuses
+  it, `check` reports a problem (exit 3) and does not probe it, and
+  `server_listening` returns False rather than raising. Tests cover a
+  non-numeric port, an out-of-range port, a negative port, and the command
+  line exit code.
+- **Empty model field.** `check` now resolves the folder from
+  `entry["model"] or entry["name"]`, as the service's provider does. Through
+  the store this case cannot arise today: `ModelEntry.summary()` already
+  substitutes the name (checked in a scratch root). Codex's reproduction used
+  a hand-built entry. The fallback was applied as hardening, not disputed.
+  Tests cover the helper and a check where the folder is named after the
+  registration.
+- Codex could not run the suite: its read-only sandbox cannot create
+  temporary directories, so 235 tests errored there. The gates were run
+  outside the sandbox; the results are in the step report. Codex also noted,
+  correctly, that Step 1's "Done when" still needs Jake to apply the
+  registrations and run `check` and `plan` on his Mac.
