@@ -1417,3 +1417,10 @@ the runner to "Tests".
   `tests/test_run_matrix_engine.py`.
 - `backend/export_runs.py` is still untracked, so the README does not
   mention it.
+
+## 2026-09-29T15:26:57-05:00 — Step 4 review: approved in round 1, no findings
+
+Codex approved Step 4 with no findings (`docs/runner/reviews/step-4-round-1.md`).
+Its sandbox could not run the suite; the gates were run outside it before the
+Step 4 commit and all passed. The matrix runner build (Steps 0 to 4) is complete
+on `feat/matrix-runner`.
