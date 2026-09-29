@@ -949,3 +949,143 @@ point, and none on added lines except one I001. That I001 is the existing
 deliberately left alone. `except (socket.timeout, TimeoutError)` keeps both
 names with a `noqa: UP041`, because the alias only exists from Python 3.10
 and CI runs the core on 3.9.
+
+## 2026-09-29 10:47 CDT — Matrix runner: goal
+
+Jake wants one command that runs prompts across the models he sets up, tells
+him when it is done, and leaves the outputs in the harness for his review.
+Evaluation stays manual. Planned in a claude.ai chat (Harness project).
+
+## 2026-09-29 11:02 CDT — Runner v1 is local only
+
+The model Jake is tuning prompts for is one of the local open-source models.
+No cloud calls and no API keys in v1. Cloud chats stay manual for now; API
+access may come later.
+
+## 2026-09-29 11:02 CDT — Claude Code builds, Codex reviews
+
+Claude Code builds the runner in gated steps, Codex reviews each step
+read-only, and Jake approves before the next step starts. A second model
+checks the work, and the two agents never edit the same files.
+
+## 2026-09-29 11:22 CDT — Lineup: newest Llama, Qwen and Gemma that fit in 24 GB
+
+llama-3.1-8b, qwen3.8-27b and gemma-4-26b-a4b, all 4-bit MLX builds in
+`~/Desktop/models/`.
+
+- Qwen3.8-27B (released August 2026) is the newest Qwen that fits.
+- Gemma 4 26B-A4B is the newest Gemma that fits. The dense 31B is over the
+  memory budget.
+- Nothing newer than Llama 3.1 8B fits: Llama 4 Scout and Maverick are 109B
+  and about 400B parameters. Meta's newer open model, Muse Glimmer 30B,
+  needs 18-20 GB at 4-bit and an add-on loader for mlx-lm.
+- The Qwen and Gemma builds are about 15-16 GB, over the default GPU memory
+  limit on a 24 GB Mac (about 16 GB). Runs that include them need
+  `sudo sysctl iogpu.wired_limit_mb=20480` first, run by Jake. It resets on
+  restart.
+
+Jake confirmed all three were downloaded at 11:47.
+
+## 2026-09-29 11:47 CDT — Runner v1 behaviour
+
+- Started from the terminal. No front-end changes.
+- Each model finishes all of its cells before the next one loads.
+- Same generation settings for every lineup model, thinking off, one repeat
+  by default.
+- Every result is an ordinary MITSS run (Outputs, matrix, transcript, review
+  queue), plus a copy outside the repo.
+- A Mac notification with sound when a matrix finishes or stops. Counts
+  only, never output text.
+- Interrupted runs resume without re-recording finished cells.
+- Tests use the stub server. Agents never load real models.
+- No scheduling. No automated scoring.
+
+## 2026-09-29 11:47 CDT — Deferred from runner v1
+
+Cloud providers and API keys, manual slots for cloud chats, scenario
+generation from input sets, prompt-version generation, blind review, and a
+Run button in the interface.
+
+## 2026-09-29 12:13 CDT — Runner builds on the existing batch path
+
+The first draft of the runner spec assumed a separate tool with its own model
+config, server management and storage. The repo already has most of that:
+the registry (with per-model settings and quarantine), `batch_generate`, the
+preflight probe, streamed requests with idle timeouts, reasoning capture,
+and one mlx_lm.server that swaps models by folder path. The spec was
+revised. The runner adds only a matrix, model-major ordering, resume, a
+memory check, notifications, a copy outside the repo and a summary, and it
+records every result through the service layer. "Same settings for every
+model" is done on the registrations, not with a new override.
+
+Open: the copy folder (default `~/Desktop/AI Outputs/MITSS Runs`), the
+settings values (suggested temperature 0.2, max_tokens 1024, thinking off),
+which branch the runner work starts from, and whether `export_runs.py` gets
+committed.
+
+## 2026-09-29T12:42:32-05:00 — Matrix runner Step 0: survey done, branch and layout chosen
+
+The survey is `docs/runner/SURVEY.md`. The planning entries above, from
+10:47 to 12:13 CDT, were appended verbatim from
+`docs/runner/DECISIONS-planning.md`, in that file's own timestamp format.
+
+- Work happens on `feat/matrix-runner`, branched from `a60b66e`. `main` lacks
+  the three commits the runner builds on (per-model settings, preflight,
+  streaming, quarantine and 404 handling).
+- The runner is `backend/run_matrix.py`, standard library only, on Python 3.9.
+  It calls `service.generate_run` once per cell. Nothing is extracted from
+  `batch_generate`, which stays unchanged: its loop does different
+  bookkeeping (per model, not per cell).
+- The manifest and `results.jsonl` live in
+  `<data root>/data/matrices/<matrix_run_id>/`, found through
+  `service.store().data_dir`. The store only lists its four known
+  subfolders, so it never sees them.
+- Retries are in `HttpProvider.generate` and its preflight, not in
+  `batch_generate`, as the spec had said. The spec was corrected.
+- Skips after an unavailable model are keyed by the served `(url, model)`,
+  as in `batch_generate`. Matrix files use registration IDs; console output,
+  runs and the transcript use names. Gemma 4's quantization is reported as
+  "mixed" (4-bit with 8-bit router projections).
+
+## 2026-09-29T12:42:32-05:00 — Runner environment goes through a wrapper script
+
+Only `dev.sh` loads `backend/.env`, so a runner started from a plain terminal
+would not see `MITSS_LLM_TIMEOUT`, which `.env` sets. Separately, a cold load
+of a 14 GB model happens inside the one-token preflight, whose 90 s default
+could be too short, and a registration cannot change it.
+
+- `scripts/run_matrix.sh` loads `backend/.env` the way `dev.sh` does, sets
+  `MITSS_LLM_PREFLIGHT_TIMEOUT` to `MITSS_MATRIX_PREFLIGHT_TIMEOUT` or 300,
+  then runs `backend/run_matrix.py` with the same arguments. Built in Step 1.
+- `run_matrix.py` never opens `.env`.
+- `check` prints the data root and the effective `MITSS_ROOT`,
+  `MITSS_LLM_TIMEOUT`, `MITSS_LLM_PREFLIGHT_TIMEOUT`, `MITSS_MAX_TOKENS`
+  and `MITSS_MODELS_DIR`, and nothing else from the environment.
+- The three lineup registrations also carry `max_tokens` and `timeout`. Step 1
+  prints them, including a `PATCH` for `llama-3-1-8b`, which has no settings
+  block today.
+
+## 2026-09-29T12:42:32-05:00 — Resume reconciles interrupted cells from index.jsonl
+
+A run is recorded inside `generate_run`. A Ctrl-C after that but before the
+runner writes its result line would leave a run that resume does not know
+about, so resume would record the cell a second time.
+
+- Before each call the runner appends a `started` line to `results.jsonl`.
+- For a cell with a `started` line and no result, resume looks in
+  `index.jsonl` for a matching `run_recorded` event after the start time and
+  adopts that `run_id` instead of calling the model again. This is read-only;
+  nothing in `data/` is rewritten. Every other cell is decided from
+  `results.jsonl` alone.
+- The first Ctrl-C lets the current cell finish, then stops cleanly. A second
+  one stops at once. Both write the summary and exit 2.
+
+Spec §2, §5.1, §5.3, §5.4, §6, §7, §8 and §9 were updated to match.
+
+## 2026-09-29T12:42:32-05:00 — Untracked files at the start of the runner work
+
+`docs/runner/`, `AGENTS.md`, `.claude/settings.json` and
+`.claude/rules/runner.md` are committed: they are the build and review
+instructions. `backend/exports/` is now gitignored; it holds exported copies
+of run text, the same data as `backend/data/`. `backend/export_runs.py` stays
+untracked for now, because the runner does not need it.

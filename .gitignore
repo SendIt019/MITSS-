@@ -1,6 +1,8 @@
 # Your prompts, outputs and verdicts. Local working data, not source.
 # See DECISIONS.md.
 backend/data/
+# Copies of run text made by export_runs.py; the same data, so the same rule.
+backend/exports/
 
 # The scheduling example's own run folder (see backend/examples/).
 backend/runs/*
