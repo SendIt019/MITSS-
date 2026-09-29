@@ -382,6 +382,53 @@ class ResumeTests(_Base):
                       self.summary())
         self.assertEqual(self.run_count(), 8)
 
+    def test_a_folder_without_run_json_is_not_a_run_so_the_cell_runs_again(self):
+        # The hard stop lands inside the store's folder write, before
+        # run.json (always written last) exists.
+        def half_written():
+            with mock.patch.object(Store, "_write_json", side_effect=KeyboardInterrupt):
+                FakeModel(self.root).record(self.prompt, 1, self.b, self.fast)
+
+        self.assertEqual(self.start(FakeModel(self.root, {2: half_written})),
+                         rm.EXIT_STOPPED)
+        runs_dir = os.path.join(self.root, "data", "runs")
+        self.assertEqual(len(os.listdir(runs_dir)), 2)      # one real, one partial
+        self.assertEqual(self.run_count(), 1)
+        resumed = FakeModel(self.root)
+        self.assertEqual(self.resume(resumed), rm.EXIT_OK)
+        self.assertIn((self.fast, 1, self.b), resumed.calls)
+        self.assertFalse([r for r in self.events("recorded") if r.get("adopted")])
+        self.assertEqual(self.run_count(), 8)
+
+    def test_ctrl_c_while_adopting_still_writes_the_summary(self):
+        self.interrupt_at(2, lambda: FakeModel(self.root).record(
+            self.prompt, 1, self.b, self.fast))
+        real_copy = rm.Session.copy_run
+
+        def copy_then_ctrl_c_twice(session, cell, run_id):
+            real_copy(session, cell, run_id)
+            os.kill(os.getpid(), signal.SIGINT)
+            os.kill(os.getpid(), signal.SIGINT)
+
+        resumed = FakeModel(self.root)
+        with mock.patch.object(rm.Session, "copy_run", copy_then_ctrl_c_twice):
+            self.assertEqual(self.resume(resumed), rm.EXIT_STOPPED)
+        self.assertEqual(resumed.calls, [])
+        self.assertEqual(len([r for r in self.events("recorded") if r.get("adopted")]), 1)
+        last = self.summary().split("=" * 72)[-1]
+        self.assertIn("stopped at once by a second Ctrl-C", last)
+        self.assertEqual(self.runner.notifications[-1][0], "MITSS matrix stopped")
+        self.assertEqual(self.events("session_end")[-1]["outcome"], "stopped")
+
+    def test_a_resume_whose_server_is_down_is_refused_with_a_summary(self):
+        self.interrupt_at(3)
+        code = rm.resume_matrix(self.only_run_id(), root=self.root,
+                                call=FakeModel(self.root), run=self.runner,
+                                listening=lambda url: False, out=self.lines.append)
+        self.assertEqual(code, rm.EXIT_INVALID)
+        self.assertIn("not resumed - the model server is not listening",
+                      self.summary().split("=" * 72)[-1])
+
     def test_a_run_another_cell_claimed_is_never_adopted(self):
         # Two repeats of one cell: repeat 1 records, repeat 2 is cut off
         # before anything is recorded. Repeat 1's run matches repeat 2's cell

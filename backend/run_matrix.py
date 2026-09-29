@@ -1076,15 +1076,18 @@ def execute(session: Session, cells: list[dict[str, Any]]) -> tuple[str, str]:
     return "finished", ""
 
 
-def run_session(session: Session, cells: list[dict[str, Any]], action: str) -> int:
-    """Run cells, then always write the summary and notify, however it ends."""
+def run_session(session: Session, work: Callable[[], tuple[str, str]],
+                action: str) -> int:
+    """Do a session's work under Ctrl-C handling, then always write the
+    summary and notify, however it ends. Every write to the matrix run
+    (adoptions, results, copies) happens inside `work`."""
     started = time.monotonic()
     session.append({"event": "session", "action": action})
     outcome, reason = "stopped", ""
     session.interrupts = Interrupts(session.out)
     session.interrupts.install()
     try:
-        outcome, reason = execute(session, cells)
+        outcome, reason = work()
     except KeyboardInterrupt:
         outcome, reason = "stopped", "stopped at once by a second Ctrl-C"
     except Exception as exc:
@@ -1105,7 +1108,9 @@ def finish_session(session: Session, outcome: str, reason: str,
         results = read_results(session.folder)
         total = tally(session.manifest, results)["total"]
         complete = total["recorded"] == total["cells"]
-        if outcome == "stopped":
+        if outcome == "refused":
+            heading, code = f"not resumed - {reason}", EXIT_INVALID
+        elif outcome == "stopped":
             heading, code = f"stopped - {reason}", EXIT_STOPPED
         elif complete:
             heading, code = "finished, every cell recorded", EXIT_OK
@@ -1123,7 +1128,7 @@ def finish_session(session: Session, outcome: str, reason: str,
         if copy_error:
             session.out(f"WARNING: the copy folder was not updated: {copy_error}")
 
-        if outcome == "stopped":
+        if outcome in ("stopped", "refused"):
             session.run(notification_command(
                 "MITSS matrix stopped",
                 f"{reason[:120]}. Resume: {resume_command(session.matrix_run_id)}",
@@ -1217,7 +1222,7 @@ def start_matrix(matrix_path: str, only: Sequence[str] | None = None,
     write_manifest(folder, manifest)
     out(f"Matrix run {matrix_run_id}: {folder}")
     session = Session(folder, manifest, root, call, run, out)
-    return run_session(session, manifest["cells"], "run")
+    return run_session(session, lambda: execute(session, manifest["cells"]), "run")
 
 
 def _ask_yes(ask: Callable[[str], str], prompt: str) -> bool:
@@ -1296,22 +1301,28 @@ def resume_matrix(matrix_run_id: str, allow_changed_inputs: bool = False,
         return EXIT_INVALID
 
     session = Session(folder, manifest, root, call, run, out)
-    session.append({"event": "session", "action": "reconcile"})
-    reconcile(session, pending, states)
-    states = cell_states(read_results(folder))
-    pending = [c for c in pending
-               if states.get(c["index"], {}).get("event") != "recorded"]
-    if not pending:
-        return finish_session(session, "finished", "", 0.0)
 
-    shelf = read_store(root)
-    models = [registration(shelf, m) for m in dict.fromkeys(c["model_id"] for c in pending)]
-    problems, warnings = preflight(models, root, manifest["copy_folder"], run, listening)
-    _print_findings(out, problems, warnings)
-    if problems:
-        return EXIT_INVALID
-    out(f"Resuming {matrix_run_id}: {len(pending)} cell(s) to run.")
-    return run_session(session, pending, "resume")
+    def work() -> tuple[str, str]:
+        # Inside the session, so a Ctrl-C while adopting or copying still
+        # ends in a summary and a notification.
+        reconcile(session, pending, states)
+        now_states = cell_states(read_results(folder))
+        remaining = [c for c in pending
+                     if now_states.get(c["index"], {}).get("event") != "recorded"]
+        if not remaining:
+            return "finished", ""
+        shelf = read_store(root)
+        models = [registration(shelf, m)
+                  for m in dict.fromkeys(c["model_id"] for c in remaining)]
+        problems, warnings = preflight(models, root, manifest["copy_folder"], run,
+                                       listening)
+        _print_findings(out, problems, warnings)
+        if problems:
+            return "refused", problems[0]
+        out(f"Resuming {matrix_run_id}: {len(remaining)} cell(s) to run.")
+        return execute(session, remaining)
+
+    return run_session(session, work, "resume")
 
 
 def _resume_problems(manifest: dict[str, Any], pending: list[dict[str, Any]],

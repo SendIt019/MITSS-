@@ -1304,3 +1304,26 @@ left open:
 The key tests (reconciliation, whole-second comparison, skipping, and the
 two-stage Ctrl-C) were each checked against a mutated engine in a scratch
 process; each failed as it should.
+
+## 2026-09-29T14:15:20-05:00 — Step 2 review round 1: two findings fixed, one open with Jake
+
+Codex requested changes (`docs/runner/reviews/step-2-round-1.md`).
+
+- **Major, fixed: resume adopted cells outside the protected session.** A
+  Ctrl-C during adoption or its copy escaped with no summary and no
+  notification. Checked against the reviewed code: the KeyboardInterrupt
+  escaped `resume_matrix` entirely. `run_session` now takes the session's
+  work as a function. Resume's adoption, preflight and cells all run inside
+  it, under the Ctrl-C handler and before the summary. A resume whose
+  preflight fails after adopting now ends as "not resumed", with a summary,
+  a "stopped" notification and exit 3 (validation or preflight error).
+- **Minor, fixed: an interrupted cell whose folder has no `run.json` was not
+  tested.** A test now stops the store in the middle of writing a run folder,
+  before `run.json` exists, and shows that resume ignores the partial
+  folder and calls the model again. The behaviour was already correct; only
+  the test was missing.
+- **Minor, not changed, pending Jake:** Codex wants a Ctrl-C pressed during
+  the last cell reported as "stopped" (exit 2). The runner reports
+  "finished" (exit 0, or 1 when a cell failed), because nothing was left to
+  stop and every cell ran. Claude Code disagrees with the finding, and under
+  the review-loop rules it goes to Jake rather than being argued with Codex.
