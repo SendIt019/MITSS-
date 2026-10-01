@@ -346,6 +346,28 @@ three files, plus `runs/<run-id>/` for every recorded run, copied as each cell
 finishes. A copy that fails is noted in the summary and never stops the
 matrix.
 
+### Timing and compute metrics
+
+Every run recorded from 2026-10-01 whose server reports usage also carries,
+in `usage`: `time_to_first_token_ms` (request sent to the first text,
+thinking included - mostly prompt processing on a local model),
+`time_to_first_answer_ms`, `prompt_tokens_per_second`,
+`decode_tokens_per_second` (completion tokens after the first, over the time
+between the first and last text), `active_params`, `flops_estimate` and
+`flops_method`. `tokens_per_second` keeps its old meaning. The transcript
+and the run panel show `first token 4.2 s`, `decode 7.6 tok/s` and
+`~1.3 PFLOPs`; each model's line in `summary.txt` is followed by the median
+first-token time and decode speed, total tokens in and out, and total
+estimated FLOPs, or `metrics: n/a` when none of its runs has them.
+
+The FLOPs figure is an estimate from the model folder's `config.json`
+(Kaplan et al., 2020): `2 × active_params + 2 × layers × context ×
+attention_width` per token, prompt and completion together. It is only
+computed for architectures whose count was checked against the published
+size (Llama, Mistral, Qwen 2, Qwen 3, Qwen 3 MoE, Qwen 3.5, Gemma 4).
+Anything else, a remote endpoint, or a config missing a field is recorded
+as null, with the reason in `flops_method`. Older runs are not rewritten.
+
 ### Known limits
 
 - Runs are sequential, through one mlx_lm.server. A slow model holds up the

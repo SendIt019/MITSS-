@@ -73,7 +73,27 @@ export function describeUsage(usage) {
     parts.push(`${inTok ?? '?'} in / ${outTok ?? '?'} out tokens`)
   }
   if (usage.tokens_per_second !== undefined) parts.push(`${usage.tokens_per_second} tok/s`)
+  // Timing and FLOPs keys exist only on runs recorded since 2026-10-01; null
+  // means the run has the key but the number could not be measured.
+  if (usage.time_to_first_token_ms != null) {
+    parts.push(`first token ${(usage.time_to_first_token_ms / 1000).toFixed(1)} s`)
+  }
+  if (usage.decode_tokens_per_second != null) {
+    parts.push(`decode ${usage.decode_tokens_per_second} tok/s`)
+  }
+  if (usage.flops_estimate != null) parts.push(formatFlops(usage.flops_estimate))
   if (usage.finish_reason) parts.push(`stopped: ${usage.finish_reason}`)
   if (usage.model_reported) parts.push(`server said: ${usage.model_reported}`)
   return parts.join('  ·  ')
+}
+
+// `~1.3 PFLOPs`, matching the transcript; the tilde marks an estimate.
+const FLOPS_UNITS = [[1e18, 'EFLOPs'], [1e15, 'PFLOPs'], [1e12, 'TFLOPs'],
+  [1e9, 'GFLOPs'], [1e6, 'MFLOPs']]
+
+export function formatFlops(value) {
+  for (const [size, unit] of FLOPS_UNITS) {
+    if (value >= size) return `~${(value / size).toFixed(1)} ${unit}`
+  }
+  return `~${value.toFixed(0)} FLOPs`
 }

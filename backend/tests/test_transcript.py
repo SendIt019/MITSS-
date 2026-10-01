@@ -10,7 +10,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pipeline import Store
-from pipeline.transcript import read, transcript_path
+from pipeline.transcript import format_flops, read, transcript_path
 
 
 class Transcript(unittest.TestCase):
@@ -83,6 +83,34 @@ class Transcript(unittest.TestCase):
         self.assertIn("usage: 3664 in / 8000 out tokens  |  83.0 tok/s  |  "
                       "stopped: length", body)
 
+    def test_timing_and_flops_join_the_usage_line(self):
+        self.store.create_run(self.prompt.id, 1, "llama", "out",
+                              source="provider",
+                              usage={"prompt_tokens": 3922, "completion_tokens": 812,
+                                     "tokens_per_second": 6.1,
+                                     "time_to_first_token_ms": 4213,
+                                     "time_to_first_answer_ms": 4213,
+                                     "decode_tokens_per_second": 7.6,
+                                     "flops_estimate": 1_300_000_000_000_000,
+                                     "finish_reason": "stop"})
+        self.assertIn("usage: 3922 in / 812 out tokens  |  6.1 tok/s  |  "
+                      "first token 4.2 s  |  decode 7.6 tok/s  |  ~1.3 PFLOPs  |  "
+                      "stopped: stop", self.text())
+
+    def test_flops_read_in_units_with_a_tilde(self):
+        self.assertEqual(format_flops(2.5e9), "~2.5 GFLOPs")
+        self.assertEqual(format_flops(118.8e12), "~118.8 TFLOPs")
+        self.assertEqual(format_flops(3.2e18), "~3.2 EFLOPs")
+        self.assertEqual(format_flops(500), "~500 FLOPs")
+
+    def test_null_metrics_are_left_out(self):
+        self.store.create_run(self.prompt.id, 1, "remote", "out", source="provider",
+                              usage={"completion_tokens": 1,
+                                     "time_to_first_token_ms": None,
+                                     "decode_tokens_per_second": None,
+                                     "flops_estimate": None})
+        self.assertIn("usage: ? in / 1 out tokens\n", self.text())
+
     def test_runs_without_usage_have_no_usage_line(self):
         self.store.create_run(self.prompt.id, 1, "hand", "out")
         self.assertNotIn("usage:", self.text())
@@ -146,7 +174,7 @@ class Transcript(unittest.TestCase):
 
     def test_empty_output_and_prompt_do_not_break_formatting(self):
         blank = self.store.create_prompt("Blank", "   ")
-        run = self.store.create_run(blank.id, 1, "", "   ")
+        self.store.create_run(blank.id, 1, "", "   ")
         self.assertIn("(empty)", self.text())
         self.assertIn("unnamed model", self.text())
 

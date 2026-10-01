@@ -65,7 +65,7 @@ import time
 import urllib.parse
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 DEFAULT_TIMEOUT = 120.0
 DEFAULT_PREFLIGHT_TIMEOUT = 90.0
@@ -191,7 +191,7 @@ def check_model_folder(path: str) -> None:
 # (min_p and presence_penalty are here because Qwen's published thinking-mode
 # settings use them and the server honours them.)
 #   name: (accepted types, minimum, maximum)
-_NUMERIC_SETTINGS: Dict[str, tuple] = {
+_NUMERIC_SETTINGS: dict[str, tuple] = {
     "temperature": ((int, float), 0, None),
     "top_p": ((int, float), 0, 1),
     "top_k": ((int,), 0, None),
@@ -234,7 +234,7 @@ def parse_preflight_timeout(value: Any) -> float:
     return parse_timeout(value, "MITSS_LLM_PREFLIGHT_TIMEOUT")
 
 
-def normalize_settings(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def normalize_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
     """Validate per-model generation settings and drop blanks.
 
     Blank means "use the default": None, "" and missing keys are all removed,
@@ -247,7 +247,7 @@ def normalize_settings(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise LLMConfigError("settings must be a JSON object")
 
-    clean: Dict[str, Any] = {}
+    clean: dict[str, Any] = {}
     for name, value in raw.items():
         if value is None or value == "":
             continue
@@ -279,7 +279,7 @@ def normalize_settings(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return clean
 
 
-def describe_settings(settings: Optional[Dict[str, Any]]) -> str:
+def describe_settings(settings: dict[str, Any] | None) -> str:
     """One readable line, e.g. `temperature=0  timeout=120s  enable_thinking=false`."""
     if not settings:
         return ""
@@ -294,7 +294,7 @@ def describe_settings(settings: Optional[Dict[str, Any]]) -> str:
     return "  ".join(parts)
 
 
-def redact(text: str, *secrets: Optional[str]) -> str:
+def redact(text: str, *secrets: str | None) -> str:
     """Blank out credential values anywhere in text.
 
     Provider error bodies are quoted back to the operator, and a server or
@@ -321,16 +321,24 @@ class Completion:
     """
 
     text: str
-    settings: Dict[str, Any] = field(default_factory=dict)
+    settings: dict[str, Any] = field(default_factory=dict)
     reasoning: str = ""
     # What the server reported about the work: token counts, why it stopped,
     # which model it says it used. None when the server reports nothing -
     # never estimated from words or characters.
-    usage: Optional[Dict[str, Any]] = None
+    usage: dict[str, Any] | None = None
     # Seconds spent on the generation request alone, with the preflight probe
     # (and any model load it absorbed) excluded. This is what a throughput
     # figure must be measured against, or swapping models would look slow.
     request_seconds: float = 0.0
+    # Seconds from sending the generation request to the first delta with
+    # any text ("first_token"), the first with answer text ("first_answer")
+    # and the last with any text ("last_token"). Only a streamed reply has
+    # them; a missing mark was never seen.
+    timing: dict[str, float] = field(default_factory=dict)
+    # The local model folder the request named, so its config.json can be
+    # read. Empty for a remote endpoint, whose folder this machine cannot see.
+    model_folder: str = ""
 
 
 # --------------------------------------------------------------------------
@@ -353,14 +361,14 @@ class LLMProvider(ABC):
         """True if complete() can be called right now."""
 
     @abstractmethod
-    def complete(self, prompt: str, model: Optional[str] = None) -> str:
+    def complete(self, prompt: str, model: str | None = None) -> str:
         """Send the prompt, return the raw reply text.
 
         `model` overrides the configured default for this one call, so an
         interface can offer a choice without reconfiguring the provider.
         """
 
-    def generate(self, prompt: str, model: Optional[str] = None) -> Completion:
+    def generate(self, prompt: str, model: str | None = None) -> Completion:
         """Like complete(), but also reports the settings that were sent.
 
         Providers that do not expose settings report none; the run is still
@@ -369,11 +377,11 @@ class LLMProvider(ABC):
         return Completion(self.complete(prompt, model), {})
 
     @property
-    def models(self) -> List[str]:
+    def models(self) -> list[str]:
         """Model names this provider can be asked for. Empty means unknown."""
         return []
 
-    def describe(self) -> Dict[str, Any]:
+    def describe(self) -> dict[str, Any]:
         """Non-secret description for the API and the interface."""
         return {"provider": self.name, "available": self.available,
                 "models": self.models}
@@ -388,13 +396,13 @@ class ManualProvider(LLMProvider):
     def available(self) -> bool:
         return False
 
-    def complete(self, prompt: str, model: Optional[str] = None) -> str:
+    def complete(self, prompt: str, model: str | None = None) -> str:
         raise ProviderUnavailable(
             "the manual provider does not call a model - copy the packet, run it "
             "through your model, and paste the reply back"
         )
 
-    def describe(self) -> Dict[str, Any]:
+    def describe(self) -> dict[str, Any]:
         return {
             "provider": self.name,
             "available": False,
@@ -417,11 +425,11 @@ class HttpProvider(LLMProvider):
     # Pause before the one retry a connection failure or idle timeout gets.
     retry_delay = 1.0
 
-    def __init__(self, url: Optional[str] = None, fmt: Optional[str] = None,
-                 model: Optional[str] = None, timeout: Optional[float] = None,
-                 key_env: Optional[str] = None,
-                 settings: Optional[Dict[str, Any]] = None,
-                 preflight: Optional[float] = None):
+    def __init__(self, url: str | None = None, fmt: str | None = None,
+                 model: str | None = None, timeout: float | None = None,
+                 key_env: str | None = None,
+                 settings: dict[str, Any] | None = None,
+                 preflight: float | None = None):
         self.url = url or os.environ.get("MITSS_LLM_URL", "")
         self.format = (fmt or os.environ.get("MITSS_LLM_FORMAT", "openai")).lower()
         self.model = model or os.environ.get("MITSS_LLM_MODEL", "local-model")
@@ -464,7 +472,7 @@ class HttpProvider(LLMProvider):
         return bool(self.url)
 
     @property
-    def models(self) -> List[str]:
+    def models(self) -> list[str]:
         """Names offered in the interface.
 
         MITSS_LLM_MODELS is a comma-separated list; if it is unset the single
@@ -472,7 +480,7 @@ class HttpProvider(LLMProvider):
         are dropped, so the list reads the way it was written.
         """
         raw = os.environ.get("MITSS_LLM_MODELS", "")
-        names: List[str] = []
+        names: list[str] = []
         for candidate in raw.split(","):
             cleaned = candidate.strip()
             if cleaned and cleaned not in names:
@@ -481,7 +489,7 @@ class HttpProvider(LLMProvider):
             return names
         return [self.model] if self.model else []
 
-    def describe(self) -> Dict[str, Any]:
+    def describe(self) -> dict[str, Any]:
         return {
             "provider": self.name,
             "available": self.available,
@@ -497,7 +505,7 @@ class HttpProvider(LLMProvider):
             "api_key_set": bool(os.environ.get(self.key_env)),
         }
 
-    def request_settings(self) -> Dict[str, Any]:
+    def request_settings(self) -> dict[str, Any]:
         """The generation fields this provider will put in an openai body.
 
         The default is temperature 0 and MITSS_MAX_TOKENS (1024); a model's
@@ -510,10 +518,10 @@ class HttpProvider(LLMProvider):
                 sent[name] = value
         return sent
 
-    def complete(self, prompt: str, model: Optional[str] = None) -> str:
+    def complete(self, prompt: str, model: str | None = None) -> str:
         return self.generate(prompt, model).text
 
-    def generate(self, prompt: str, model: Optional[str] = None) -> Completion:
+    def generate(self, prompt: str, model: str | None = None) -> Completion:
         if not self.url:
             raise ProviderUnavailable(
                 "MITSS_LLM_URL is not set; cannot call a model automatically"
@@ -523,16 +531,18 @@ class HttpProvider(LLMProvider):
         # label. Labelling a run with a model the endpoint never saw would
         # make every later comparison a lie.
         chosen = model or self.model
+        folder = ""
         if is_local_url(self.url):
             # A local server loads models from folders we can see, so ask for
             # the folder by absolute path and check it before sending
             # anything. Remote endpoints are left exactly as configured.
             chosen = resolve_model_path(chosen)
             check_model_folder(chosen)
+            folder = chosen
 
         if self.format == "openai":
             sent = self.request_settings()
-            body: Dict[str, Any] = {
+            body: dict[str, Any] = {
                 "model": chosen,
                 "messages": [{"role": "user", "content": prompt}],
             }
@@ -557,10 +567,12 @@ class HttpProvider(LLMProvider):
             self._preflight(chosen)
 
         started = time.monotonic()  # the attempt that answered, below
+        marks: dict[str, float] = {}
         for attempt in (1, 2):
             started = time.monotonic()
+            marks = {}
             try:
-                payload = self._post(body, self.timeout)
+                payload = self._post(body, self.timeout, marks)
                 break
             except (LLMUnreachable, LLMTimeout):
                 # Once only. A server that answered with an error status is
@@ -570,7 +582,9 @@ class HttpProvider(LLMProvider):
                 time.sleep(self.retry_delay)
         request_seconds = time.monotonic() - started
         text, reasoning = self._parse(payload)
-        return Completion(text, used, reasoning, _usage(payload), request_seconds)
+        timing = {name: moment - started for name, moment in marks.items()}
+        return Completion(text, used, reasoning, _usage(payload), request_seconds,
+                          timing, folder)
 
     def _preflight(self, chosen: str) -> None:
         """Ask for one token before the real run.
@@ -600,13 +614,15 @@ class HttpProvider(LLMProvider):
                 f"{self.preflight_timeout:g}s (the prompt was not sent)"
             ) from None
 
-    def _post(self, body: Dict[str, Any], timeout: float) -> str:
+    def _post(self, body: dict[str, Any], timeout: float,
+              marks: dict[str, float] | None = None) -> str:
         """POST the body and return the reply as one JSON document.
 
         `timeout` is an idle limit: the longest the socket may sit without
         receiving a byte. Connecting is bounded separately by
         CONNECT_TIMEOUT. A streamed (text/event-stream) reply is accumulated
         into the same shape a non-streamed one has, so parsing is shared.
+        A streamed reply also fills `marks` (see _read_stream).
         """
         try:
             parts = urllib.parse.urlsplit(self.url)
@@ -628,7 +644,7 @@ class HttpProvider(LLMProvider):
                 connection.connect()
             # socket.timeout is only an alias of TimeoutError from 3.10; CI
             # also runs the core on 3.9.
-            except (socket.timeout, TimeoutError):  # noqa: UP041
+            except (socket.timeout, TimeoutError):
                 raise LLMUnreachable(
                     f"the model server at {self.url} did not accept a "
                     f"connection within {self.connect_timeout:g}s"
@@ -661,7 +677,7 @@ class HttpProvider(LLMProvider):
                 )
             content_type = (response.getheader("Content-Type") or "").lower()
             if content_type.startswith("text/event-stream"):
-                return self._read_stream(response)
+                return self._read_stream(response, marks)
             return response.read().decode("utf-8")
         except (socket.timeout, TimeoutError):
             raise LLMTimeout(self._timeout_message(timeout)) from None
@@ -682,14 +698,20 @@ class HttpProvider(LLMProvider):
         finally:
             connection.close()
 
-    def _read_stream(self, response: http.client.HTTPResponse) -> str:
+    def _read_stream(self, response: http.client.HTTPResponse,
+                     marks: dict[str, float] | None = None) -> str:
         """Accumulate server-sent events into one chat-completion document.
 
         Content and reasoning deltas are joined in order; finish_reason,
         usage and the model name are taken from whichever chunk carries
         them. `: keepalive` comment lines (mlx_lm.server sends them during
         prompt processing) are skipped - but they still reset the idle timer.
+
+        `marks` gets the monotonic time of the first delta carrying any text,
+        the first carrying answer text, and the last carrying any text.
         """
+        if marks is None:
+            marks = {}
         content: list[str] = []
         reasoning: list[str] = []
         saw_content = False
@@ -741,6 +763,8 @@ class HttpProvider(LLMProvider):
                     thought = delta.get("reasoning_content")
                 if isinstance(thought, str):
                     reasoning.append(thought)
+                _mark(marks, bool(piece) and isinstance(piece, str),
+                      bool(thought) and isinstance(thought, str))
             if isinstance(first.get("finish_reason"), str) and first["finish_reason"]:
                 finish_reason = first["finish_reason"]
 
@@ -775,7 +799,7 @@ class HttpProvider(LLMProvider):
             "model's timeout setting or MITSS_LLM_TIMEOUT"
         )
 
-    def _headers(self) -> Dict[str, str]:
+    def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
         key = os.environ.get(self.key_env)
         if key:
@@ -834,7 +858,19 @@ class HttpProvider(LLMProvider):
         )
 
 
-def _usage(payload: str) -> Optional[Dict[str, Any]]:
+def _mark(marks: dict[str, float], answer: bool, thinking: bool) -> None:
+    """Note when text arrived. Empty strings (role-only or final deltas)
+    are not text."""
+    if not (answer or thinking):
+        return
+    moment = time.monotonic()
+    marks.setdefault("first_token", moment)
+    if answer:
+        marks.setdefault("first_answer", moment)
+    marks["last_token"] = moment
+
+
+def _usage(payload: str) -> dict[str, Any] | None:
     """Token counts and stop reason, exactly as the server reported them.
 
     Returns None when the server says nothing. Counts are never inferred from
@@ -848,7 +884,7 @@ def _usage(payload: str) -> Optional[Dict[str, Any]]:
     if not isinstance(data, dict):
         return None
 
-    out: Dict[str, Any] = {}
+    out: dict[str, Any] = {}
     reported = data.get("usage")
     if isinstance(reported, dict):
         for name in ("prompt_tokens", "completion_tokens", "total_tokens"):
@@ -893,7 +929,7 @@ def _server_said(body: bytes, limit: int = 200) -> str:
     return f": {raw}"
 
 
-_REGISTRY: Dict[str, type] = {
+_REGISTRY: dict[str, type] = {
     ManualProvider.name: ManualProvider,
     HttpProvider.name: HttpProvider,
 }
@@ -906,12 +942,12 @@ def register_provider(name: str, provider_class: type) -> None:
     _REGISTRY[name.lower()] = provider_class
 
 
-def available_providers() -> Dict[str, str]:
+def available_providers() -> dict[str, str]:
     return {name: cls.__doc__.strip().splitlines()[0] if cls.__doc__ else ""
             for name, cls in _REGISTRY.items()}
 
 
-def get_provider(name: Optional[str] = None) -> LLMProvider:
+def get_provider(name: str | None = None) -> LLMProvider:
     """Return the configured provider. Unknown names fall back to manual.
 
     Raises LLMConfigError if the provider's configuration is unusable (for

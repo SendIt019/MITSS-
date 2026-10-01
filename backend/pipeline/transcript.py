@@ -16,9 +16,11 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime
-from typing import Optional
 
 TRANSCRIPT_NAME = "transcript.txt"
+
+FLOPS_UNITS = ((1e18, "EFLOPs"), (1e15, "PFLOPs"), (1e12, "TFLOPs"),
+               (1e9, "GFLOPs"), (1e6, "MFLOPs"))
 
 HEAVY = "=" * 72
 LIGHT = "-" * 72
@@ -32,7 +34,8 @@ def _stamp(iso: str = "") -> str:
     """Human-readable timestamp; falls back to now if the run has none."""
     if iso:
         return iso.replace("T", " ")[:19]
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Local time on purpose, the same clock as store.now().
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # noqa: DTZ005
 
 
 def format_settings(settings) -> str:
@@ -52,8 +55,23 @@ def format_settings(settings) -> str:
     return "  ".join(parts)
 
 
+def format_flops(value) -> str:
+    """`~1.3 PFLOPs` - the tilde marks it as an estimate."""
+    if value is None:
+        return ""
+    for size, unit in FLOPS_UNITS:
+        if value >= size:
+            return f"~{value / size:.1f} {unit}"
+    return f"~{value:.0f} FLOPs"
+
+
 def format_usage(usage) -> str:
-    """`3664 in / 8000 out tokens  |  83.0 tok/s  |  stopped: length`."""
+    """`3664 in / 8000 out tokens  |  83.0 tok/s  |  first token 4.2 s  |
+    decode 7.6 tok/s  |  ~1.3 PFLOPs  |  stopped: length`.
+
+    Runs recorded before the timing and FLOPs keys existed simply lack those
+    parts.
+    """
     if not usage:
         return ""
     parts = []
@@ -65,6 +83,12 @@ def format_usage(usage) -> str:
                      " out tokens")
     if usage.get("tokens_per_second") is not None:
         parts.append(f"{usage['tokens_per_second']} tok/s")
+    if usage.get("time_to_first_token_ms") is not None:
+        parts.append(f"first token {usage['time_to_first_token_ms'] / 1000:.1f} s")
+    if usage.get("decode_tokens_per_second") is not None:
+        parts.append(f"decode {usage['decode_tokens_per_second']} tok/s")
+    if usage.get("flops_estimate") is not None:
+        parts.append(format_flops(usage["flops_estimate"]))
     if usage.get("finish_reason"):
         parts.append(f"stopped: {usage['finish_reason']}")
     if usage.get("model_reported"):
@@ -78,8 +102,8 @@ def format_run(run) -> str:
     settings = getattr(run, "settings", None)
     lines = [
         HEAVY,
-        f"{_stamp(run.created_at)}  |  {run.prompt_id} v{run.version}  |  "
-        f"{run.model or 'unnamed model'}",
+        (f"{_stamp(run.created_at)}  |  {run.prompt_id} v{run.version}  |  "
+        f"{run.model or 'unnamed model'}"),
         f"run: {run.id}",
         f"input: {run.input_name or 'none'}  |  source: {run.source}{duration}",
     ]
@@ -146,7 +170,7 @@ def append_verdict(data_dir: str, run) -> str:
     return append(data_dir, format_verdict(run))
 
 
-def read(data_dir: str, limit: Optional[int] = None) -> str:
+def read(data_dir: str, limit: int | None = None) -> str:
     """Whole transcript, or the last `limit` characters of it."""
     path = transcript_path(data_dir)
     if not os.path.exists(path):

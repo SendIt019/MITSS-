@@ -37,8 +37,8 @@ from mitss.llm import (
     models_dir,
     normalize_settings,
     parse_preflight_timeout,
-    redact,
     parse_timeout,
+    redact,
     register_provider,
     resolve_model_path,
 )
@@ -142,9 +142,8 @@ class Http(unittest.TestCase):
     def test_unrecognised_json_shape_is_an_error(self):
         REPLY["status"] = 200
         REPLY["body"] = json.dumps({"unexpected": {"nested": "thing"}})
-        with StubServer() as url:
-            with self.assertRaises(LLMError):
-                HttpProvider(url=url).complete("x")
+        with StubServer() as url, self.assertRaises(LLMError):
+            HttpProvider(url=url).complete("x")
 
     def test_reasoning_is_captured_beside_the_answer(self):
         # mlx_lm.server puts a thinking model's chain of thought in its own
@@ -259,9 +258,8 @@ class Http(unittest.TestCase):
         REPLY["body"] = json.dumps({"completion": "late"})
         REPLY["delay"] = 1.5
         started = time.monotonic()
-        with StubServer() as url:
-            with self.assertRaises(LLMStuck) as caught:
-                HttpProvider(url=url, timeout=30, preflight=0.3).complete("real")
+        with StubServer() as url, self.assertRaises(LLMStuck) as caught:
+            HttpProvider(url=url, timeout=30, preflight=0.3).complete("real")
         self.assertLess(time.monotonic() - started, 5)
         message = str(caught.exception)
         self.assertIn("model server is stuck, restart mlx_lm.server", message)
@@ -304,9 +302,8 @@ class Http(unittest.TestCase):
             {"error": "Invalid authorization: Bearer sk-super-secret-value-9"})
         os.environ["MITSS_LLM_API_KEY"] = "sk-super-secret-value-9"
         try:
-            with StubServer() as url:
-                with self.assertRaises(LLMServerError) as caught:
-                    HttpProvider(url=url, preflight=0).complete("x")
+            with StubServer() as url, self.assertRaises(LLMServerError) as caught:
+                HttpProvider(url=url, preflight=0).complete("x")
         finally:
             os.environ.pop("MITSS_LLM_API_KEY", None)
         message = str(caught.exception)
@@ -491,9 +488,8 @@ class Http(unittest.TestCase):
         REPLY["status"] = 200
         REPLY["body"] = json.dumps({"completion": "late"})
         REPLY["delay"] = 1.5
-        with StubServer() as url:
-            with self.assertRaises(LLMTimeout) as caught:
-                HttpProvider(url=url, timeout=0.3).complete("x")
+        with StubServer() as url, self.assertRaises(LLMTimeout) as caught:
+            HttpProvider(url=url, timeout=0.3).complete("x")
         message = str(caught.exception)
         self.assertIn("did not answer within 0.3s", message)
         self.assertIn("restart", message)
@@ -674,6 +670,33 @@ class Streaming(unittest.TestCase):
         with StreamServer() as url, self.assertRaises(LLMUnreachable):
             HttpProvider(url=url).generate("q")
         self.assertEqual(SEEN["count"], 2)
+
+    def test_stream_marks_first_text_first_answer_and_last_text(self):
+        # Pauses before the first delta and between deltas, as prompt
+        # processing and decoding would make them.
+        SCRIPT["attempts"] = [self._whole_answer(pause=0.15)]
+        with StreamServer() as url:
+            completion = HttpProvider(url=url, model="my-model").generate("q")
+        timing = completion.timing
+        self.assertAlmostEqual(timing["first_token"], 0.15, delta=0.1)   # "Think "
+        self.assertAlmostEqual(timing["first_answer"], 0.45, delta=0.1)  # "The "
+        # "answer." is the last text; the empty finish delta after it is not.
+        self.assertAlmostEqual(timing["last_token"], 0.60, delta=0.1)
+        self.assertEqual(completion.model_folder,
+                         os.path.join(self.models_dir, "my-model"))
+
+    def test_marks_are_measured_from_the_attempt_that_answered(self):
+        SCRIPT["attempts"] = [[(2.0, DONE)], self._whole_answer()]
+        with StreamServer() as url:
+            completion = HttpProvider(url=url, timeout=0.3).generate("q")
+        self.assertLess(completion.timing["first_token"], 0.2)
+
+    def test_a_non_streamed_reply_has_no_marks(self):
+        REPLY.update(body=json.dumps({"choices": [{"message": {"content": "x"}}]}),
+                     status=200, delay=0)
+        with StubServer() as url:
+            completion = HttpProvider(url=url).generate("q")
+        self.assertEqual(completion.timing, {})
 
     def test_404_is_not_retried(self):
         SCRIPT["status"] = 404

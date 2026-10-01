@@ -1525,3 +1525,66 @@ backend suite, the build or the browser check; all three were run outside it
 before the round-1 fix was committed and passed (backend OK, `npm test` 11/11,
 build OK, `npm run check:browser` OK). Not yet looked at by eye in Jake's own
 browser; the steps are in the hand-off report.
+
+## 2026-10-01T12:49:26-05:00 — Run metrics: time to first token, decode speed, estimated FLOPs
+
+Jake's task, `docs/runner/METRICS_TASK.md`. Every new run whose server
+reports usage gains seven keys in `usage`: `time_to_first_token_ms`,
+`time_to_first_answer_ms`, `prompt_tokens_per_second`,
+`decode_tokens_per_second`, `active_params`, `flops_estimate`,
+`flops_method`. Old runs are not rewritten.
+
+- **`tokens_per_second` is unchanged.** It is still completion tokens over
+  the whole generation request (preflight excluded, prompt processing
+  included). The runner's time estimate reads it, and old runs only have it,
+  so changing its meaning would make new and old runs incomparable without
+  saying so. The new `decode_tokens_per_second` is the figure with prompt
+  processing taken out.
+- **Timings** are marks taken in `HttpProvider._read_stream` on the attempt
+  that answered: first delta with any non-empty text (answer or thinking),
+  first with answer text, last with any text. Empty-string deltas (role-only
+  and the final `finish_reason` chunk) are not text. A non-streamed reply
+  has no marks, so its timing keys are null.
+- **FLOPs formula** (`backend/mitss/metrics.py`, method string
+  `kaplan2020-v1`): Kaplan et al. 2020 forward pass, per token
+  `2 × active_params + 2 × layers × context × attention_width`, prompt and
+  completion together, the context sum in closed form. Choices inside it:
+  - `active_params` includes embeddings (and the untied output head), so it
+    matches published sizes as the task requires. Kaplan's own N leaves
+    embeddings out; that makes this a slight overcount (about 6.5 % on Llama).
+  - Attention width is per layer: Gemma 4's full-attention layers use
+    `global_head_dim` (512), its sliding layers `head_dim` (256).
+  - Linear-attention layers (Qwen 3.5 Gated DeltaNet, 48 of Qwen 3.8 27B's
+    64 layers) add no context term: they carry a fixed-size state rather
+    than attending to every earlier token. Their weights still count.
+  - Gemma 4 names its experts-per-token field `top_k_experts`, not
+    `num_experts_per_tok`; Qwen 3 MoE uses `num_experts_per_tok`. Gemma 4's
+    MoE block sits beside a dense MLP in every layer, and both are counted.
+  - Only the language model under `text_config` is counted; vision towers
+    do not run for a text prompt.
+  - Recognised `model_type`s: llama, mistral, qwen2, qwen3, qwen3_moe,
+    gemma4_text, qwen3_5_text, each checked against a published size.
+    Anything else (gemma3, gemma4_unified, gpt_oss, phi3, granite hybrid),
+    a remote endpoint, a missing field, or a sliding window without
+    `layer_types` gives null with the reason appended to `flops_method`.
+- **Checks against published sizes** (all within 5 %): llama-3.1-8b 8.030 B
+  (8.0 B); gemma-4-26b-a4b 3.822 B active (3.8 B), 25.232 B total (25.2 B);
+  qwen3.8-27b 26.895 B dense (27 B). The other recognised local models:
+  mistral-nemo-12b 12.25 B, mistral-small-3.2-24b 23.57 B (text model only),
+  qwen2.5-14b 14.77 B, qwen3-14b 14.77 B, qwen3-30b-a3b 3.35 B active /
+  30.53 B total, qwen3.5-9b 8.95 B.
+- **summary.txt** reads each recorded cell's `run.json` and adds, under
+  each model and the total, median first-token time, median decode speed,
+  total tokens in and out and total FLOPs, over runs that carry
+  `flops_method`; a model with none shows `metrics: n/a`.
+- **Ruff on touched files.** The gate is ruff on changed files and must pass
+  (2026-09-29 13:42). `service.py`, `llm.py`, `transcript.py`,
+  `test_llm.py` and `test_transcript.py` already had about 220 findings,
+  nearly all `Optional`/`Dict` annotation style. Ruff's fixes were applied
+  to them (annotations and import layout, plus one unused `noqa`, one
+  `startswith` tuple, one unused test variable and one nested `with`); the
+  `datetime.now()` in the transcript keeps local time on purpose and has a
+  `noqa`. The suite passes on 3.9 and 3.14 after it.
+- The task's "front-end change" (the run panel line in `settings.js`) is
+  the one exception to the runner rules' "no front-end changes in v1",
+  because Jake's task asks for it.

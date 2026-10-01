@@ -56,6 +56,7 @@ from pipeline import NotFound, Store
 # The store's own id alphabet, so a name that passes here is safe as a
 # directory name for the same reason a run id is.
 from pipeline.store import _SAFE_ID, now, stamp, text_sha256
+from pipeline.transcript import format_flops
 
 EXIT_OK = 0
 EXIT_FAILED_CELLS = 1
@@ -905,9 +906,60 @@ def resume_command(matrix_run_id: str) -> str:
     return f"scripts/run_matrix.sh resume {matrix_run_id}"
 
 
+def recorded_usage(manifest: dict[str, Any], results: list[dict[str, Any]],
+                   root: str | None = None) -> dict[str, list[dict[str, Any]]]:
+    """Each model's recorded runs' usage, read from their run.json, keeping
+    only runs that carry the timing and FLOPs keys (flops_method is always
+    written with them). Older runs and unreadable ones are left out."""
+    shelf = read_store(root)
+    by_cell = {c["index"]: c["model_id"] for c in manifest["cells"]}
+    usages: dict[str, list[dict[str, Any]]] = {m: [] for m in by_cell.values()}
+    for index, state in cell_states(results).items():
+        if state.get("event") != "recorded" or index not in by_cell:
+            continue
+        try:
+            usage = shelf.get_run(state["record"]["run_id"]).usage
+        except (NotFound, KeyError, ValueError, OSError):
+            continue
+        if isinstance(usage, dict) and "flops_method" in usage:
+            usages[by_cell[index]].append(usage)
+    return usages
+
+
+def _numbers(usages: list[dict[str, Any]], key: str) -> list[float]:
+    return [u[key] for u in usages
+            if isinstance(u.get(key), (int, float)) and not isinstance(u.get(key), bool)]
+
+
+def metrics_line(usages: list[dict[str, Any]]) -> str:
+    """Median time to first token and decode speed, total tokens and total
+    estimated FLOPs, over runs that carry the new keys."""
+    if not usages:
+        return "    metrics: n/a"
+    first = _numbers(usages, "time_to_first_token_ms")
+    decode = _numbers(usages, "decode_tokens_per_second")
+    flops = _numbers(usages, "flops_estimate")
+    parts = [
+        (f"first token median {statistics.median(first) / 1000:.1f} s"
+         if first else "first token median n/a"),
+        (f"decode median {statistics.median(decode):.1f} tok/s"
+         if decode else "decode median n/a"),
+        (f"{sum(_numbers(usages, 'prompt_tokens')):.0f} in / "
+         f"{sum(_numbers(usages, 'completion_tokens')):.0f} out tokens"),
+    ]
+    if flops:
+        missing = len(usages) - len(flops)
+        parts.append(format_flops(sum(flops))
+                     + (f" ({missing} run(s) without an estimate)" if missing else ""))
+    else:
+        parts.append("FLOPs n/a")
+    return f"    metrics from {len(usages)} run(s): " + " · ".join(parts)
+
+
 def summary_text(manifest: dict[str, Any], results: list[dict[str, Any]],
-                 heading: str, folder: str) -> str:
+                 heading: str, folder: str, root: str | None = None) -> str:
     counts = tally(manifest, results)
+    usages = recorded_usage(manifest, results, root)
     matrix = manifest["matrix"]
     lines = [
         f"MITSS matrix {manifest['matrix_run_id']}: {heading}",
@@ -916,9 +968,11 @@ def summary_text(manifest: dict[str, Any], results: list[dict[str, Any]],
          f"{', '.join(matrix['inputs'])}, repeats {matrix['repeats']}."),
         "",
     ]
-    for bucket in counts["per_model"].values():
+    for model_id, bucket in counts["per_model"].items():
         lines.append(_count_line(bucket["name"], bucket))
+        lines.append(metrics_line(usages.get(model_id, [])))
     lines.append(_count_line("Total", counts["total"]))
+    lines.append(metrics_line([u for runs in usages.values() for u in runs]))
     if counts["failures"]:
         lines += ["", "Failed or skipped:"] + [f"  {f}" for f in counts["failures"]]
     if counts["notes"]:
@@ -1127,7 +1181,8 @@ def finish_session(session: Session, outcome: str, reason: str,
         copy_error = session.copy_own_files((MANIFEST, RESULTS))
         if copy_error:
             results = read_results(session.folder)
-        text = summary_text(session.manifest, results, heading, session.folder)
+        text = summary_text(session.manifest, results, heading, session.folder,
+                            session.root)
         path = os.path.join(session.folder, SUMMARY)
         with open(path, "a", encoding="utf-8") as handle:   # append-only too
             if handle.tell():
@@ -1369,7 +1424,7 @@ def status_lines(matrix_run_id: str | None = None, root: str | None = None) -> l
         folder = matrix_dir(matrix_run_id, root)
         manifest = read_manifest(folder)
         return summary_text(manifest, read_results(folder), "status",
-                            folder).rstrip().split("\n")
+                            folder, root).rstrip().split("\n")
     base = matrices_dir(root)
     names = sorted(n for n in os.listdir(base) if _is_safe_id(n)) \
         if os.path.isdir(base) else []

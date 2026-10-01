@@ -9,19 +9,36 @@ from __future__ import annotations
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from mitss.llm import (
-    HttpProvider, LLMConfigError, LLMError, LLMModelUnavailable, LLMServerError,
-    LLMStuck, LLMTimeout, ProviderUnavailable, get_provider, normalize_settings,
+    Completion,
+    HttpProvider,
+    LLMConfigError,
+    LLMError,
+    LLMModelUnavailable,
+    LLMServerError,
+    LLMStuck,
+    LLMTimeout,
+    ProviderUnavailable,
+    get_provider,
+    normalize_settings,
 )
+from mitss.metrics import run_metrics
 from pipeline import (
-    NotFound, Store, build_digest, build_matrix, compare_runs, diff_text,
+    NotFound,
+    Store,
+    build_digest,
+    build_matrix,
+    compare_runs,
+    diff_text,
     digest_text,
 )
 from pipeline.models import UNRATED, VERDICT_LABELS, VERDICTS, is_verdict
-from pipeline.render import preview as render_preview, render_prompt
-from pipeline.transcript import read as read_transcript, transcript_path
+from pipeline.render import preview as render_preview
+from pipeline.render import render_prompt
+from pipeline.transcript import read as read_transcript
+from pipeline.transcript import transcript_path
 
 BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -40,7 +57,7 @@ class ServiceError(Exception):
         self.unavailable = unavailable
 
 
-def store(root: Optional[str] = None) -> Store:
+def store(root: str | None = None) -> Store:
     return Store(root or os.environ.get("MITSS_ROOT", BACKEND_ROOT))
 
 
@@ -55,21 +72,21 @@ def _found(call, *args, **kwargs):
 # prompts
 # --------------------------------------------------------------------------
 
-def list_prompts(root: Optional[str] = None) -> List[Dict[str, Any]]:
+def list_prompts(root: str | None = None) -> list[dict[str, Any]]:
     return [p.summary() for p in store(root).list_prompts()]
 
 
 def create_prompt(name: str, text: str, note: str = "",
-                  tags: Optional[List[str]] = None,
-                  root: Optional[str] = None) -> Dict[str, Any]:
+                  tags: list[str] | None = None,
+                  root: str | None = None) -> dict[str, Any]:
     if not (text or "").strip():
         raise ServiceError("the prompt is empty")
     prompt = store(root).create_prompt(name.strip() or "untitled", text, note, tags)
     return prompt_detail(prompt.id, root=root)
 
 
-def prompt_detail(prompt_id: str, version: Optional[int] = None,
-                  root: Optional[str] = None) -> Dict[str, Any]:
+def prompt_detail(prompt_id: str, version: int | None = None,
+                  root: str | None = None) -> dict[str, Any]:
     shelf = store(root)
     prompt = _found(shelf.get_prompt, prompt_id)
 
@@ -91,42 +108,42 @@ def prompt_detail(prompt_id: str, version: Optional[int] = None,
 # input sets
 # --------------------------------------------------------------------------
 
-def list_inputs(root: Optional[str] = None) -> List[Dict[str, Any]]:
+def list_inputs(root: str | None = None) -> list[dict[str, Any]]:
     return [i.summary() for i in store(root).list_inputs()]
 
 
 def create_input(name: str, text: str, note: str = "",
-                 root: Optional[str] = None) -> Dict[str, Any]:
+                 root: str | None = None) -> dict[str, Any]:
     if not (text or "").strip():
         raise ServiceError("the input is empty")
     return store(root).create_input(name.strip() or "untitled input", text, note).to_dict()
 
 
-def get_input(input_id: str, root: Optional[str] = None) -> Dict[str, Any]:
+def get_input(input_id: str, root: str | None = None) -> dict[str, Any]:
     return _found(store(root).get_input, input_id).to_dict()
 
 
-def update_input(input_id: str, name: Optional[str] = None, text: Optional[str] = None,
-                 note: Optional[str] = None, root: Optional[str] = None) -> Dict[str, Any]:
+def update_input(input_id: str, name: str | None = None, text: str | None = None,
+                 note: str | None = None, root: str | None = None) -> dict[str, Any]:
     if text is not None and not text.strip():
         raise ServiceError("the input is empty")
     return _found(store(root).update_input, input_id, name, text, note).to_dict()
 
 
-def delete_input(input_id: str, root: Optional[str] = None) -> Dict[str, Any]:
+def delete_input(input_id: str, root: str | None = None) -> dict[str, Any]:
     _found(store(root).delete_input, input_id)
     return {"deleted": input_id}
 
 
-def upload_input(filename: str, text: str, root: Optional[str] = None) -> Dict[str, Any]:
+def upload_input(filename: str, text: str, root: str | None = None) -> dict[str, Any]:
     if not (text or "").strip():
         raise ServiceError("the uploaded file is empty")
     name = os.path.splitext(os.path.basename(filename or "input.txt"))[0]
     return create_input(name, text, f"uploaded {filename}", root=root)
 
 
-def preview_prompt(prompt_id: str, version: Optional[int] = None,
-                   input_id: str = "", root: Optional[str] = None) -> Dict[str, Any]:
+def preview_prompt(prompt_id: str, version: int | None = None,
+                   input_id: str = "", root: str | None = None) -> dict[str, Any]:
     """What would actually be sent, given this version and this input."""
     shelf = store(root)
     prompt = _found(shelf.get_prompt, prompt_id)
@@ -149,7 +166,7 @@ def preview_prompt(prompt_id: str, version: Optional[int] = None,
 
 
 def add_version(prompt_id: str, text: str, note: str = "",
-                root: Optional[str] = None) -> Dict[str, Any]:
+                root: str | None = None) -> dict[str, Any]:
     if not (text or "").strip():
         raise ServiceError("the prompt is empty")
     shelf = store(root)
@@ -165,7 +182,7 @@ def add_version(prompt_id: str, text: str, note: str = "",
     return prompt_detail(prompt_id, root=root)
 
 
-def rename_prompt(prompt_id: str, name: str, root: Optional[str] = None) -> Dict[str, Any]:
+def rename_prompt(prompt_id: str, name: str, root: str | None = None) -> dict[str, Any]:
     if not (name or "").strip():
         raise ServiceError("name cannot be empty")
     shelf = store(root)
@@ -173,8 +190,8 @@ def rename_prompt(prompt_id: str, name: str, root: Optional[str] = None) -> Dict
     return prompt_detail(prompt_id, root=root)
 
 
-def upload_prompt(filename: str, text: str, prompt_id: Optional[str] = None,
-                  note: str = "", root: Optional[str] = None) -> Dict[str, Any]:
+def upload_prompt(filename: str, text: str, prompt_id: str | None = None,
+                  note: str = "", root: str | None = None) -> dict[str, Any]:
     """A .txt upload either starts a new prompt or adds a version to one."""
     if not (text or "").strip():
         raise ServiceError("the uploaded file is empty")
@@ -197,9 +214,9 @@ _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 MODEL_FORMATS = ("openai", "raw")
 
 
-def _validate_model_fields(url: Optional[str], fmt: Optional[str],
-                           key_env: Optional[str]) -> None:
-    if url and not (url.startswith("http://") or url.startswith("https://")):
+def _validate_model_fields(url: str | None, fmt: str | None,
+                           key_env: str | None) -> None:
+    if url and not (url.startswith(("http://", "https://"))):
         raise ServiceError("url must start with http:// or https://")
     if fmt is not None and fmt not in MODEL_FORMATS:
         raise ServiceError(f"format must be one of: {', '.join(MODEL_FORMATS)}")
@@ -211,7 +228,7 @@ def _validate_model_fields(url: Optional[str], fmt: Optional[str],
         )
 
 
-def _clean_settings(settings: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _clean_settings(settings: dict[str, Any] | None) -> dict[str, Any] | None:
     """Validate a registration's generation settings; None means untouched."""
     if settings is None:
         return None
@@ -221,21 +238,21 @@ def _clean_settings(settings: Optional[Dict[str, Any]]) -> Optional[Dict[str, An
         raise ServiceError(f"settings: {exc}") from None
 
 
-def _model_payload(entry) -> Dict[str, Any]:
+def _model_payload(entry) -> dict[str, Any]:
     data = entry.summary()
     # Presence only, resolved at request time. The value is never exposed.
     data["key_set"] = bool(entry.key_env and os.environ.get(entry.key_env))
     return data
 
 
-def list_models(root: Optional[str] = None) -> List[Dict[str, Any]]:
+def list_models(root: str | None = None) -> list[dict[str, Any]]:
     return [_model_payload(m) for m in store(root).list_models()]
 
 
 def register_model(name: str, owner: str = "", url: str = "",
                    fmt: str = "openai", model: str = "", key_env: str = "",
-                   notes: str = "", settings: Optional[Dict[str, Any]] = None,
-                   root: Optional[str] = None) -> Dict[str, Any]:
+                   notes: str = "", settings: dict[str, Any] | None = None,
+                   root: str | None = None) -> dict[str, Any]:
     if not (name or "").strip():
         raise ServiceError("the model needs a name - it is the label runs are recorded under")
     _validate_model_fields(url, fmt, key_env)
@@ -246,7 +263,7 @@ def register_model(name: str, owner: str = "", url: str = "",
     return _model_payload(entry)
 
 
-def get_model(model_id: str, root: Optional[str] = None) -> Dict[str, Any]:
+def get_model(model_id: str, root: str | None = None) -> dict[str, Any]:
     return _model_payload(_found(store(root).get_model, model_id))
 
 
@@ -267,13 +284,13 @@ def _clean_quarantine(reason: str | None) -> str | None:
     return reason
 
 
-def update_model(model_id: str, owner: Optional[str] = None,
-                 url: Optional[str] = None, fmt: Optional[str] = None,
-                 model: Optional[str] = None, key_env: Optional[str] = None,
-                 notes: Optional[str] = None,
-                 settings: Optional[Dict[str, Any]] = None,
+def update_model(model_id: str, owner: str | None = None,
+                 url: str | None = None, fmt: str | None = None,
+                 model: str | None = None, key_env: str | None = None,
+                 notes: str | None = None,
+                 settings: dict[str, Any] | None = None,
                  quarantine: str | None = None,
-                 root: Optional[str] = None) -> Dict[str, Any]:
+                 root: str | None = None) -> dict[str, Any]:
     _validate_model_fields(url, fmt, key_env)
     entry = _found(store(root).update_model, model_id, owner, url, fmt,
                    model, key_env, notes, _clean_settings(settings),
@@ -281,7 +298,7 @@ def update_model(model_id: str, owner: Optional[str] = None,
     return _model_payload(entry)
 
 
-def delete_model(model_id: str, root: Optional[str] = None) -> Dict[str, Any]:
+def delete_model(model_id: str, root: str | None = None) -> dict[str, Any]:
     _found(store(root).delete_model, model_id)
     return {"deleted": model_id}
 
@@ -290,9 +307,9 @@ def delete_model(model_id: str, root: Optional[str] = None) -> Dict[str, Any]:
 # runs
 # --------------------------------------------------------------------------
 
-def record_run(prompt_id: str, version: Optional[int], model: str, output: str,
+def record_run(prompt_id: str, version: int | None, model: str, output: str,
                notes: str = "", verdict: str = UNRATED, input_id: str = "",
-               root: Optional[str] = None) -> Dict[str, Any]:
+               root: str | None = None) -> dict[str, Any]:
     if not (output or "").strip():
         raise ServiceError("the output is empty")
     if not is_verdict(verdict):
@@ -309,14 +326,14 @@ def record_run(prompt_id: str, version: Optional[int], model: str, output: str,
     return run.to_dict()
 
 
-def run_detail(run_id: str, root: Optional[str] = None) -> Dict[str, Any]:
+def run_detail(run_id: str, root: str | None = None) -> dict[str, Any]:
     return _found(store(root).get_run, run_id).to_dict()
 
 
-def list_runs(prompt_id: Optional[str] = None, version: Optional[int] = None,
-              model: Optional[str] = None, input_id: Optional[str] = None,
-              verdict: Optional[str] = None,
-              root: Optional[str] = None) -> List[Dict[str, Any]]:
+def list_runs(prompt_id: str | None = None, version: int | None = None,
+              model: str | None = None, input_id: str | None = None,
+              verdict: str | None = None,
+              root: str | None = None) -> list[dict[str, Any]]:
     if verdict is not None and not is_verdict(verdict):
         raise ServiceError(f"verdict must be one of: {', '.join(VERDICTS)}")
     return [r.summary()
@@ -324,19 +341,19 @@ def list_runs(prompt_id: Optional[str] = None, version: Optional[int] = None,
                                            verdict)]
 
 
-def review_run(run_id: str, verdict: Optional[str] = None,
-               notes: Optional[str] = None, root: Optional[str] = None) -> Dict[str, Any]:
+def review_run(run_id: str, verdict: str | None = None,
+               notes: str | None = None, root: str | None = None) -> dict[str, Any]:
     if verdict is not None and not is_verdict(verdict):
         raise ServiceError(f"verdict must be one of: {', '.join(VERDICTS)}")
     return _found(store(root).review_run, run_id, verdict, notes).to_dict()
 
 
-def delete_run(run_id: str, root: Optional[str] = None) -> Dict[str, Any]:
+def delete_run(run_id: str, root: str | None = None) -> dict[str, Any]:
     _found(store(root).delete_run, run_id)
     return {"deleted": run_id}
 
 
-def _resolve_version(shelf: Store, prompt_id: str, version: Optional[int]):
+def _resolve_version(shelf: Store, prompt_id: str, version: int | None):
     prompt = _found(shelf.get_prompt, prompt_id)
     target = version if version is not None else (prompt.latest.version if prompt.latest else None)
     if target is None:
@@ -347,9 +364,9 @@ def _resolve_version(shelf: Store, prompt_id: str, version: Optional[int]):
     return target, prompt_version
 
 
-def _fetch_and_record(shelf: Store, provider, label: str, ask_for: Optional[str],
+def _fetch_and_record(shelf: Store, provider, label: str, ask_for: str | None,
                       prompt_id: str, target: int, rendered: str,
-                      input_id: str) -> Dict[str, Any]:
+                      input_id: str) -> dict[str, Any]:
     started = time.monotonic()
     try:
         # Pass the chosen model through, so the endpoint is actually asked for
@@ -387,13 +404,15 @@ def _fetch_and_record(shelf: Store, provider, label: str, ask_for: Optional[str]
                            source="provider", duration_ms=elapsed,
                            input_id=input_id, settings=completion.settings,
                            reasoning=completion.reasoning,
-                           usage=_with_rate(completion.usage,
-                                            completion.request_seconds or seconds))
+                           usage=_with_metrics(
+                               _with_rate(completion.usage,
+                                          completion.request_seconds or seconds),
+                               completion))
     return run.to_dict()
 
 
-def _with_rate(usage: Optional[Dict[str, Any]],
-               seconds: float) -> Optional[Dict[str, Any]]:
+def _with_rate(usage: dict[str, Any] | None,
+               seconds: float) -> dict[str, Any] | None:
     """Add tokens per second, but only when the server gave a real count.
 
     A rate inferred from word counts would look like a measurement and be
@@ -414,6 +433,23 @@ def _with_rate(usage: Optional[Dict[str, Any]],
     return usage
 
 
+def _with_metrics(usage: dict[str, Any] | None,
+                  completion: Completion) -> dict[str, Any] | None:
+    """Add the timing and compute keys (mitss.metrics) after tokens_per_second.
+
+    Only when the server reported usage at all: a run with nothing reported
+    stays null rather than gaining a block of nulls. tokens_per_second is
+    left exactly as it was - the runner's time estimate and older runs
+    depend on its meaning.
+    """
+    if not usage:
+        return usage
+    enriched = dict(usage)
+    enriched.update(run_metrics(usage, completion.timing,
+                                completion.model_folder or None))
+    return enriched
+
+
 def _provider_for(entry) -> HttpProvider:
     """A provider built from a registration, carrying its settings."""
     try:
@@ -426,9 +462,9 @@ def _provider_for(entry) -> HttpProvider:
             f"'{entry.name}' has an unusable setting: {exc}", 500) from None
 
 
-def generate_run(prompt_id: str, version: Optional[int] = None, model: str = "",
+def generate_run(prompt_id: str, version: int | None = None, model: str = "",
                  input_id: str = "", model_id: str = "",
-                 root: Optional[str] = None) -> Dict[str, Any]:
+                 root: str | None = None) -> dict[str, Any]:
     """Send the prompt to a model and record what comes back.
 
     `model_id` names a registered model, whose own endpoint is called and
@@ -471,9 +507,9 @@ def generate_run(prompt_id: str, version: Optional[int] = None, model: str = "",
                              prompt_id, target, rendered, input_id)
 
 
-def batch_generate(prompt_id: str, version: Optional[int] = None,
-                   input_id: str = "", model_ids: Optional[List[str]] = None,
-                   root: Optional[str] = None) -> Dict[str, Any]:
+def batch_generate(prompt_id: str, version: int | None = None,
+                   input_id: str = "", model_ids: list[str] | None = None,
+                   root: str | None = None) -> dict[str, Any]:
     """One prompt version across several registered models in one action.
 
     With no `model_ids`, every callable registered model is asked. One model
@@ -563,8 +599,8 @@ def batch_generate(prompt_id: str, version: Optional[int] = None,
 # comparison
 # --------------------------------------------------------------------------
 
-def matrix(prompt_id: str, input_id: Optional[str] = None,
-           root: Optional[str] = None) -> Dict[str, Any]:
+def matrix(prompt_id: str, input_id: str | None = None,
+           root: str | None = None) -> dict[str, Any]:
     """Versions against models, optionally narrowed to one input set.
 
     `input_id=None` aggregates every input, which is fine for a coverage
@@ -584,7 +620,7 @@ def matrix(prompt_id: str, input_id: Optional[str] = None,
     return payload
 
 
-def compare(run_a: str, run_b: str, root: Optional[str] = None) -> Dict[str, Any]:
+def compare(run_a: str, run_b: str, root: str | None = None) -> dict[str, Any]:
     shelf = store(root)
     left = _found(shelf.get_run, run_a)
     right = _found(shelf.get_run, run_b)
@@ -595,7 +631,7 @@ def compare(run_a: str, run_b: str, root: Optional[str] = None) -> Dict[str, Any
 
 
 def compare_versions(prompt_id: str, a: int, b: int,
-                     root: Optional[str] = None) -> Dict[str, Any]:
+                     root: str | None = None) -> dict[str, Any]:
     """Diff two revisions of the prompt itself."""
     shelf = store(root)
     prompt = _found(shelf.get_prompt, prompt_id)
@@ -614,7 +650,7 @@ def compare_versions(prompt_id: str, a: int, b: int,
 # misc
 # --------------------------------------------------------------------------
 
-def llm_status() -> Dict[str, Any]:
+def llm_status() -> dict[str, Any]:
     try:
         return get_provider().describe()
     except LLMConfigError as exc:
@@ -624,31 +660,31 @@ def llm_status() -> Dict[str, Any]:
                 "available": False, "models": [], "error": str(exc)}
 
 
-def digest(root: Optional[str] = None) -> Dict[str, Any]:
+def digest(root: str | None = None) -> dict[str, Any]:
     """Everything recorded, rolled up by prompt, version and model."""
     shelf = store(root)
     return build_digest(shelf.list_prompts(), shelf.list_runs(),
                         shelf.list_models())
 
 
-def digest_as_text(root: Optional[str] = None) -> str:
+def digest_as_text(root: str | None = None) -> str:
     return digest_text(digest(root))
 
 
-def verdict_options() -> List[Dict[str, str]]:
+def verdict_options() -> list[dict[str, str]]:
     return [{"value": v, "label": VERDICT_LABELS[v]} for v in VERDICTS]
 
 
-def activity(limit: int = 50, root: Optional[str] = None) -> List[Dict[str, Any]]:
+def activity(limit: int = 50, root: str | None = None) -> list[dict[str, Any]]:
     return store(root).read_events(limit=limit)
 
 
-def transcript(limit: Optional[int] = None, root: Optional[str] = None) -> str:
+def transcript(limit: int | None = None, root: str | None = None) -> str:
     """The rolling plain-text transcript of every run."""
     shelf = store(root)
     text = read_transcript(shelf.data_dir, limit)
     return text or "No runs recorded yet.\n"
 
 
-def transcript_location(root: Optional[str] = None) -> str:
+def transcript_location(root: str | None = None) -> str:
     return transcript_path(store(root).data_dir)

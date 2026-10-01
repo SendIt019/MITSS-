@@ -153,6 +153,52 @@ class _Base(unittest.TestCase):
         return len(Store(self.root).list_runs())
 
 
+class MetricsModel(FakeModel):
+    """Records new-style usage for the fast model only; the slow model's
+    runs look like ones recorded before the metrics existed."""
+
+    FIRST = (1000, 2000, 3000, 9000)      # time to first token, ms
+    DECODE = (5.0, 8.0, 9.0, 30.0)
+    FLOPS = (1e15, 2e15, None, 1e15)       # one run without an estimate
+
+    def record(self, prompt_id, version, input_id, model_id):
+        shelf = Store(self.root)
+        name = shelf.get_model(model_id).name
+        usage = {"finish_reason": "stop", "prompt_tokens": 100,
+                 "completion_tokens": 10, "tokens_per_second": 4.0}
+        if name == "fast-8b":
+            n = sum(1 for call in self.calls if call[0] == model_id) - 1
+            usage.update({"time_to_first_token_ms": self.FIRST[n],
+                          "decode_tokens_per_second": self.DECODE[n],
+                          "flops_estimate": self.FLOPS[n],
+                          "flops_method": "kaplan2020-v1"})
+        run = shelf.create_run(prompt_id, version, name, OUTPUT, source="provider",
+                               input_id=input_id, usage=usage)
+        return run.to_dict()
+
+
+class SummaryMetrics(_Base):
+    def test_medians_and_totals_per_model_and_overall(self):
+        self.assertEqual(self.start(MetricsModel(self.root)), rm.EXIT_OK)
+        lines = self.summary().split("\n")
+        fast = lines.index(next(x for x in lines if x.startswith("  fast-8b:")))
+        self.assertEqual(lines[fast + 1],
+                         "    metrics from 4 run(s): first token median 2.5 s · "
+                         "decode median 8.5 tok/s · 400 in / 40 out tokens · "
+                         "~4.0 PFLOPs (1 run(s) without an estimate)")
+        slow = lines.index(next(x for x in lines if x.startswith("  slow-27b:")))
+        self.assertEqual(lines[slow + 1], "    metrics: n/a")
+        total = lines.index(next(x for x in lines if x.startswith("  Total:")))
+        self.assertTrue(lines[total + 1].startswith("    metrics from 4 run(s): "))
+        # status reads the same runs.
+        self.assertIn("    metrics: n/a",
+                      rm.status_lines(self.only_run_id(), root=self.root))
+
+    def test_a_matrix_of_old_style_runs_shows_n_a_everywhere(self):
+        self.start(FakeModel(self.root))
+        self.assertEqual(self.summary().count("    metrics: n/a"), 3)
+
+
 class RunTests(_Base):
     def test_a_full_run_records_every_cell_model_major(self):
         model = FakeModel(self.root)
