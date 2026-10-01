@@ -263,6 +263,22 @@ class RunTests(_Base):
         self.assertIn("TRUNCATED", "\n".join(self.lines))
         self.assertIn("2 truncated", self.runner.notifications[-1][1])
 
+    def test_a_guard_stop_counts_as_truncated_and_is_named(self):
+        for finish in ("repetition", "thinking_budget"):
+            self.assertTrue(rm.is_truncated(finish))
+        self.assertFalse(rm.is_truncated("stop"))
+        self.start(FakeModel(self.root, finish="repetition"), versions=[1], inputs=[self.a])
+        self.assertTrue(all(r["truncated"] for r in self.events("recorded")))
+        self.assertIn("TRUNCATED (repetition)", "\n".join(self.lines))
+        self.assertIn("truncated 1 (repetition 1)", self.summary())
+        self.assertIn("  Total: recorded 2/2 · failed 0 · skipped 0 · "
+                      "truncated 2 (repetition 2)", self.summary())
+
+    def test_a_cap_only_truncation_reads_as_before(self):
+        self.start(FakeModel(self.root, finish="length"), versions=[1], inputs=[self.a])
+        self.assertIn("truncated 1 · ", self.summary())
+        self.assertNotIn("(length", self.summary())
+
     def test_models_option_narrows_the_matrix(self):
         model = FakeModel(self.root)
         self.assertEqual(self.start(model, only=[self.slow]), rm.EXIT_OK)

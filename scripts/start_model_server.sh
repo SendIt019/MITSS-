@@ -9,6 +9,12 @@
 # the server loads whichever one a request names. Ctrl-C stops the server.
 # Runs under caffeinate so the Mac cannot sleep mid-batch (keep the lid open).
 #
+# Crash watchdog (scripts/watch_server.sh): if the server's generation thread
+# dies - `RuntimeError: [metal::malloc] Resource limit (499000) exceeded` or
+# any other traceback from `_generate` - the server is stopped at once, so the
+# runner sees a dropped connection and records a failure instead of waiting
+# out its idle timeout. Output passes through unchanged; exit 70 after a crash.
+#
 # Overridable with environment variables:
 #   MITSS_MODELS_DIR        folder holding the model folders   (~/Desktop/models)
 #   MITSS_MODELS_ENV        the venv that has mlx_lm installed  (~/models-env)
@@ -40,7 +46,7 @@ if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
 fi
 
 echo "mlx_lm.server: model $MODEL, port $PORT, max-tokens $MAX_TOKENS  (Ctrl-C stops it)"
-exec caffeinate -i "$SERVER" \
+exec "$(dirname "$0")/watch_server.sh" "$SERVER" \
   --model "$MODELS_DIR/$MODEL" \
   --port "$PORT" \
   --max-tokens "$MAX_TOKENS"

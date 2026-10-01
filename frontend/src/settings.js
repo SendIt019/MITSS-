@@ -10,9 +10,15 @@ export const SETTING_FIELDS = [
   { key: 'top_k', label: 'Top-k', hint: 'integer' },
   { key: 'min_p', label: 'Min-p', hint: '0–1' },
   { key: 'presence_penalty', label: 'Presence penalty', hint: 'e.g. 1.5' },
+  { key: 'repetition_penalty', label: 'Repetition penalty', hint: '≥ 1, e.g. 1.1' },
+  { key: 'frequency_penalty', label: 'Frequency penalty', hint: 'number' },
   { key: 'max_tokens', label: 'Max tokens', hint: 'blank = server cap' },
   { key: 'seed', label: 'Seed', hint: 'integer' },
   { key: 'timeout', label: 'Timeout (s)', hint: 'blank = MITSS_LLM_TIMEOUT' },
+  // MITSS-side guards, never sent to the server. Listed so that saving the
+  // form keeps them: the form's fields are the whole settings block.
+  { key: 'thinking_budget', label: 'Thinking budget', hint: 'tokens; blank or 0 = none' },
+  { key: 'loop_repeats', label: 'Loop repeats', hint: 'blank = 40; 0 = off' },
 ]
 
 export const BLANK_SETTINGS = Object.fromEntries(
@@ -82,7 +88,7 @@ export function describeUsage(usage) {
     parts.push(`decode ${usage.decode_tokens_per_second} tok/s`)
   }
   if (usage.flops_estimate != null) parts.push(formatFlops(usage.flops_estimate))
-  if (usage.finish_reason) parts.push(`stopped: ${usage.finish_reason}`)
+  if (usage.finish_reason) parts.push(`stopped: ${usage.finish_reason}${stopDetail(usage)}`)
   if (usage.model_reported) parts.push(`server said: ${usage.model_reported}`)
   return parts.join('  ·  ')
 }
@@ -96,4 +102,16 @@ export function formatFlops(value) {
     if (value >= size) return `~${(value / size).toFixed(1)} ${unit}`
   }
   return `~${value.toFixed(0)} FLOPs`
+}
+
+// What a MITSS stream guard saw, matching the transcript's wording.
+function stopDetail(usage) {
+  if (usage.finish_reason === 'repetition' && usage.repetition_unit != null) {
+    return ` of ${JSON.stringify(usage.repetition_unit)} x${usage.repetition_count ?? '?'}`
+      + ` in the ${usage.repetition_in ?? 'answer'}`
+  }
+  if (usage.finish_reason === 'thinking_budget' && usage.thinking_deltas != null) {
+    return ` after ~${usage.thinking_deltas} thinking tokens, no answer`
+  }
+  return ''
 }

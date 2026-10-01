@@ -330,8 +330,31 @@ tells you which:
   a runner fault. The one answer still truncated at 3072 was llama-3.1-8b
   looping on `02-cav-division-120h`.
 
-The console marks each truncated cell `TRUNCATED`, and a finished
-notification includes the count.
+Two MITSS-side guards also end a reply early, and count as truncated too:
+
+- **Loop detection** (`finish_reason: repetition`). A unit of up to 60
+  characters repeated back to back `loop_repeats` times (default 40, over at
+  least 200 characters) in the answer or in the thinking stops the stream.
+  The run keeps everything received and records `repetition_unit`,
+  `repetition_count` and `repetition_in` (answer or thinking) in `usage`. A
+  registration's `loop_repeats: 0` turns it off.
+- **Thinking budget** (`finish_reason: thinking_budget`). With a
+  registration's `thinking_budget` set, a model that streams more than that
+  many reasoning deltas (about one token each) before any answer text is
+  stopped, keeping its thinking. It fails fast; it does not try to salvage an
+  answer.
+
+Neither setting is sent to the model server. The summary names any reason
+other than the cap, e.g. `truncated 2 (length 1, repetition 1)`, and the
+console marks each truncated cell `TRUNCATED`, or `TRUNCATED (repetition)`.
+A finished notification includes the count.
+
+If mlx_lm.server's generation thread crashes (as Qwen 3.8 27B did with
+`RuntimeError: [metal::malloc] Resource limit (499000) exceeded`),
+`scripts/start_model_server.sh` stops the server at once, so the cell fails
+straight away instead of waiting out the idle timeout.
+`scripts/patch_mlx_lm.sh` patches mlx-lm 0.31.3 for that crash (see
+DECISIONS.md, 2026-10-01).
 
 ### Where things go
 

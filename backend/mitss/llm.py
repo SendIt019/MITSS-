@@ -67,6 +67,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+from .stream_guard import DEFAULT_LOOP_REPEATS, StreamWatch
+
 DEFAULT_TIMEOUT = 120.0
 DEFAULT_PREFLIGHT_TIMEOUT = 90.0
 DEFAULT_TEMPERATURE = 0
@@ -189,7 +191,8 @@ def check_model_folder(path: str) -> None:
 # Mirrors what mlx_lm.server validates on its side, so a bad value is refused
 # here with a readable message instead of coming back as a bare HTTP 400.
 # (min_p and presence_penalty are here because Qwen's published thinking-mode
-# settings use them and the server honours them.)
+# settings use them and the server honours them; repetition_penalty and
+# frequency_penalty because mlx_lm.server accepts them too.)
 #   name: (accepted types, minimum, maximum)
 _NUMERIC_SETTINGS: dict[str, tuple] = {
     "temperature": ((int, float), 0, None),
@@ -197,9 +200,16 @@ _NUMERIC_SETTINGS: dict[str, tuple] = {
     "top_k": ((int,), 0, None),
     "min_p": ((int, float), 0, 1),
     "presence_penalty": ((int, float), None, None),
+    "repetition_penalty": ((int, float), 1, None),
+    "frequency_penalty": ((int, float), None, None),
     "max_tokens": ((int,), 1, None),
     "seed": ((int,), 0, None),
+    # MITSS-side, never sent to the server (see mitss.stream_guard). 0 is off.
+    "thinking_budget": ((int,), 0, None),
+    "loop_repeats": ((int,), 0, None),
 }
+# Settings that act in MITSS rather than in the request body.
+CLIENT_SETTINGS = ("timeout", "thinking_budget", "loop_repeats")
 SETTING_NAMES = tuple(_NUMERIC_SETTINGS) + ("chat_template_kwargs", "timeout")
 
 
@@ -509,14 +519,20 @@ class HttpProvider(LLMProvider):
         """The generation fields this provider will put in an openai body.
 
         The default is temperature 0 and MITSS_MAX_TOKENS (1024); a model's
-        own settings override either.
+        own settings override either. MITSS-side settings (CLIENT_SETTINGS)
+        never reach the body.
         """
         sent: dict[str, Any] = {"temperature": DEFAULT_TEMPERATURE,
                                 "max_tokens": self.max_tokens}
         for name, value in self.settings.items():
-            if name != "timeout":
+            if name not in CLIENT_SETTINGS:
                 sent[name] = value
         return sent
+
+    def stream_watch(self) -> StreamWatch:
+        """Fresh guards for one attempt, from this model's settings."""
+        return StreamWatch(self.settings.get("loop_repeats", DEFAULT_LOOP_REPEATS),
+                           self.settings.get("thinking_budget", 0))
 
     def complete(self, prompt: str, model: str | None = None) -> str:
         return self.generate(prompt, model).text
@@ -562,17 +578,24 @@ class HttpProvider(LLMProvider):
             # only when asked for.
             body["stream"] = True
             body["stream_options"] = {"include_usage": True}
+            # The guards that can end a stream early are part of what a run
+            # was made with, so they go in the snapshot too: the loop limit
+            # always (it is on by default), the thinking budget when set.
+            watch = self.stream_watch()
+            used["loop_repeats"] = watch.answer_loop.repeats
+            if watch.thinking_budget:
+                used["thinking_budget"] = watch.thinking_budget
 
         if self.format == "openai" and self.preflight_timeout > 0:
             self._preflight(chosen)
 
         started = time.monotonic()  # the attempt that answered, below
-        marks: dict[str, float] = {}
+        watch = self.stream_watch()
         for attempt in (1, 2):
             started = time.monotonic()
-            marks = {}
+            watch = self.stream_watch()
             try:
-                payload = self._post(body, self.timeout, marks)
+                payload = self._post(body, self.timeout, watch)
                 break
             except (LLMUnreachable, LLMTimeout):
                 # Once only. A server that answered with an error status is
@@ -582,8 +605,12 @@ class HttpProvider(LLMProvider):
                 time.sleep(self.retry_delay)
         request_seconds = time.monotonic() - started
         text, reasoning = self._parse(payload)
-        timing = {name: moment - started for name, moment in marks.items()}
-        return Completion(text, used, reasoning, _usage(payload), request_seconds,
+        timing = {name: moment - started for name, moment in watch.marks.items()}
+        usage = _usage(payload)
+        if watch.stop:
+            # A guard ended the stream; the server never sent its usage chunk.
+            usage = {**(usage or {}), **watch.stop}
+        return Completion(text, used, reasoning, usage, request_seconds,
                           timing, folder)
 
     def _preflight(self, chosen: str) -> None:
@@ -615,14 +642,14 @@ class HttpProvider(LLMProvider):
             ) from None
 
     def _post(self, body: dict[str, Any], timeout: float,
-              marks: dict[str, float] | None = None) -> str:
+              watch: StreamWatch | None = None) -> str:
         """POST the body and return the reply as one JSON document.
 
         `timeout` is an idle limit: the longest the socket may sit without
         receiving a byte. Connecting is bounded separately by
         CONNECT_TIMEOUT. A streamed (text/event-stream) reply is accumulated
         into the same shape a non-streamed one has, so parsing is shared.
-        A streamed reply also fills `marks` (see _read_stream).
+        A streamed reply is also fed through `watch` (see _read_stream).
         """
         try:
             parts = urllib.parse.urlsplit(self.url)
@@ -677,7 +704,7 @@ class HttpProvider(LLMProvider):
                 )
             content_type = (response.getheader("Content-Type") or "").lower()
             if content_type.startswith("text/event-stream"):
-                return self._read_stream(response, marks)
+                return self._read_stream(response, watch)
             return response.read().decode("utf-8")
         except (socket.timeout, TimeoutError):
             raise LLMTimeout(self._timeout_message(timeout)) from None
@@ -699,7 +726,7 @@ class HttpProvider(LLMProvider):
             connection.close()
 
     def _read_stream(self, response: http.client.HTTPResponse,
-                     marks: dict[str, float] | None = None) -> str:
+                     watch: StreamWatch | None = None) -> str:
         """Accumulate server-sent events into one chat-completion document.
 
         Content and reasoning deltas are joined in order; finish_reason,
@@ -707,11 +734,14 @@ class HttpProvider(LLMProvider):
         them. `: keepalive` comment lines (mlx_lm.server sends them during
         prompt processing) are skipped - but they still reset the idle timer.
 
-        `marks` gets the monotonic time of the first delta carrying any text,
-        the first carrying answer text, and the last carrying any text.
+        Every delta's text goes through `watch`, which marks when text
+        arrived and may end the reply early (a loop, or a thinking budget
+        spent before any answer). Then reading stops with what has arrived,
+        under the guard's finish_reason, and closing the connection tells
+        the server to stop generating.
         """
-        if marks is None:
-            marks = {}
+        if watch is None:
+            watch = StreamWatch()
         content: list[str] = []
         reasoning: list[str] = []
         saw_content = False
@@ -763,8 +793,9 @@ class HttpProvider(LLMProvider):
                     thought = delta.get("reasoning_content")
                 if isinstance(thought, str):
                     reasoning.append(thought)
-                _mark(marks, bool(piece) and isinstance(piece, str),
-                      bool(thought) and isinstance(thought, str))
+                if watch.see(piece, thought):
+                    finish_reason = watch.stop["finish_reason"]
+                    break
             if isinstance(first.get("finish_reason"), str) and first["finish_reason"]:
                 finish_reason = first["finish_reason"]
 
@@ -856,18 +887,6 @@ class HttpProvider(LLMProvider):
             "could not find completion text in the model response; expected an "
             "openai-style 'choices' array or a completion/response/output/text key"
         )
-
-
-def _mark(marks: dict[str, float], answer: bool, thinking: bool) -> None:
-    """Note when text arrived. Empty strings (role-only or final deltas)
-    are not text."""
-    if not (answer or thinking):
-        return
-    moment = time.monotonic()
-    marks.setdefault("first_token", moment)
-    if answer:
-        marks.setdefault("first_answer", moment)
-    marks["last_token"] = moment
 
 
 def _usage(payload: str) -> dict[str, Any] | None:

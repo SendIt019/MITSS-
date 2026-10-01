@@ -1,7 +1,7 @@
 // Run with `npm test` (node's built-in runner; no extra dependencies).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { describeUsage, formatFlops } from '../src/settings.js'
+import { describeUsage, formatFlops, formToSettings, settingsToForm } from '../src/settings.js'
 
 test('a new run shows first token, decode speed and estimated FLOPs', () => {
   const line = describeUsage({
@@ -30,4 +30,19 @@ test('FLOPs use readable units with a tilde', () => {
   assert.equal(formatFlops(118.8e12), '~118.8 TFLOPs')
   assert.equal(formatFlops(1.3e15), '~1.3 PFLOPs')
   assert.equal(formatFlops(500), '~500 FLOPs')
+})
+
+test('the guard finish reasons say what they saw', () => {
+  assert.equal(describeUsage({ finish_reason: 'repetition', repetition_unit: 'N/A,',
+    repetition_count: 41, repetition_in: 'answer' }),
+  'stopped: repetition of "N/A," x41 in the answer')
+  assert.equal(describeUsage({ finish_reason: 'thinking_budget', thinking_deltas: 8001 }),
+    'stopped: thinking_budget after ~8001 thinking tokens, no answer')
+})
+
+test('saving the Models form keeps the guard and penalty settings', () => {
+  const settings = { temperature: 1, max_tokens: 16384, thinking_budget: 8000,
+    loop_repeats: 40, repetition_penalty: 1.1, frequency_penalty: 0.5,
+    chat_template_kwargs: { enable_thinking: true } }
+  assert.deepEqual(formToSettings(settingsToForm(settings)), settings)
 })

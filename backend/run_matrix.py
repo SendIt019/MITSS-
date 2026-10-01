@@ -713,6 +713,13 @@ MANIFEST = "manifest.json"
 RESULTS = "results.jsonl"
 SUMMARY = "summary.txt"
 FINAL = ("recorded", "failed", "skipped")
+# Finish reasons that mean the answer was cut off: the token cap, or a MITSS
+# stream guard (a loop, or the thinking budget spent before any answer).
+TRUNCATING = ("length", "repetition", "thinking_budget")
+
+
+def is_truncated(finish: Any) -> bool:
+    return finish in TRUNCATING
 
 
 def matrices_dir(root: str | None = None) -> str:
@@ -866,8 +873,11 @@ def tally(manifest: dict[str, Any], results: list[dict[str, Any]]) -> dict[str, 
             bucket[kind] += 1
         record = state.get("record") or {}
         if kind == "recorded" and record.get("truncated"):
-            counts["truncated"] += 1
-            total["truncated"] += 1
+            reason = record.get("finish_reason") or "length"
+            for bucket in (counts, total):
+                bucket["truncated"] += 1
+                why = bucket.setdefault("truncated_by", {})
+                why[reason] = why.get(reason, 0) + 1
         if kind in ("failed", "skipped"):
             failures.append(f"cell {cell['index']} {describe_cell(cell, names)}: "
                             f"{kind}: {record.get('error') or record.get('reason')}")
@@ -996,10 +1006,19 @@ def summary_text(manifest: dict[str, Any], results: list[dict[str, Any]],
     return "\n".join(lines) + "\n"
 
 
+def _truncated_reasons(bucket: dict[str, Any]) -> str:
+    """` (length 1, repetition 2)` when anything but the token cap cut an
+    answer off; nothing when every truncation was the cap, as before."""
+    why = bucket.get("truncated_by") or {}
+    if set(why) <= {"length"}:
+        return ""
+    return " (" + ", ".join(f"{r} {n}" for r, n in sorted(why.items())) + ")"
+
+
 def _count_line(label: str, bucket: dict[str, Any]) -> str:
     parts = [f"recorded {bucket['recorded']}/{bucket['cells']}",
              f"failed {bucket['failed']}", f"skipped {bucket['skipped']}",
-             f"truncated {bucket['truncated']}"]
+             f"truncated {bucket['truncated']}" + _truncated_reasons(bucket)]
     if bucket["not_run"]:
         parts.append(f"not run {bucket['not_run']}")
     parts.append(format_elapsed(bucket["seconds"]))
@@ -1138,12 +1157,13 @@ def execute(session: Session, cells: list[dict[str, Any]]) -> tuple[str, str]:
             continue
         elapsed = int((time.monotonic() - started) * 1000)
         finish = (run.get("usage") or {}).get("finish_reason")
-        truncated = finish == "length"
+        truncated = is_truncated(finish)
         session.append({"event": "recorded", "cell": cell["index"],
                         "run_id": run["id"], "finish_reason": finish,
                         "truncated": truncated, "elapsed_ms": elapsed})
         session.out(f"{tag} … recorded {elapsed / 1000:.1f} s"
-                    + ("  TRUNCATED" if truncated else ""))
+                    + (f"  TRUNCATED ({finish})" if truncated and finish != "length"
+                       else "  TRUNCATED" if truncated else ""))
         session.copy_run(cell, run["id"])
     return "finished", ""
 
@@ -1340,7 +1360,7 @@ def reconcile(session: Session, cells: list[dict[str, Any]],
                       for e in events)
         finish = (run.usage or {}).get("finish_reason")
         session.append({"event": "recorded", "cell": cell["index"], "run_id": run.id,
-                        "finish_reason": finish, "truncated": finish == "length",
+                        "finish_reason": finish, "truncated": is_truncated(finish),
                         "elapsed_ms": run.duration_ms, "adopted": True,
                         "index_event": indexed})
         session.out(f"{_tag(cell, session.manifest)} … adopted {run.id}"

@@ -1625,3 +1625,79 @@ read n/a) fixed, nothing declined. Codex's sandbox could not run the full
 backend suite (temporary-directory restriction); every gate was run outside
 it before each commit and passed. Not yet checked against a live model; the
 command is in the step report for Jake.
+
+## 2026-10-01T15:53:40-05:00 — Thinking-on runs: mlx-lm patch, crash watchdog, loop and thinking guards
+
+Jake's task, `docs/runner/THINKING_FIX_TASK.md`, branch `fix/thinking-runs`
+from `feat/run-metrics`.
+
+- **Checked before writing the patch (read only).** mlx-lm in ~/models-env
+  is 0.31.3. `ArraysCache.advance()` (`mlx_lm/models/cache.py` lines
+  685-689) does `self.lengths -= N` and `self.left_padding -= N` with no
+  evaluation, as issue #1332 describes. qwen3.8-27b's config.json has
+  model_type `qwen3_5`; `mlx_lm/models/qwen3_5.py` `make_cache()` gives
+  every linear-attention layer (48 of 64) an `ArraysCache`.
+- **`scripts/patch_mlx_lm.sh` patches a third-party package in Jake's
+  environment.** It adds `mx.eval(self.lengths)` and
+  `mx.eval(self.left_padding)` at the end of `advance()`, refuses any
+  version but 0.31.3 and any `advance()` that does not match the 0.31.3
+  text exactly, keeps `cache.py.orig-mitss`, is a no-op the second time,
+  and `--undo` restores the backup. An mlx-lm upgrade or reinstall
+  replaces cache.py and drops the patch; the version check then makes the
+  script refuse until someone looks again. Jake runs it; it was tested only
+  on copies (a fake env, and a copy of the real cache.py, which patched,
+  parsed and undid to a byte-identical file).
+- **Crash watchdog** is `scripts/watch_server.sh`, which
+  `start_model_server.sh` now execs (arguments unchanged; caffeinate moved
+  into the wrapper as `caffeinate -w <server pid>`). It fires on a
+  traceback from the `_generate` thread (on the exception line that ends
+  it, so the whole traceback reaches the log) or any
+  `RuntimeError: [metal::malloc]` line, prints one line, stops the server
+  and exits 70. Request-handler tracebacks (a client hanging up, which the
+  new guards now cause) are passed through and do not stop it. A separate
+  wrapper because the runner rules forbid running start_model_server.sh;
+  the wrapper is tested against a fake server. Written for macOS bash 3.2.
+- **Loop detection** (`mitss/stream_guard.py`): a unit of 1-60 characters
+  repeated back to back `loop_repeats` times (default 40) at the end of the
+  answer or of the thinking, checked separately. It also has to cover at
+  least 200 characters, so a ruler line of 72 '=' or '-' is not a loop;
+  that is the one addition to the task's rule. The tail kept is 60 x the
+  threshold characters, since "a few hundred" cannot hold 40 repeats of a
+  60-character unit. It stops reading, keeps everything received, records
+  `finish_reason: repetition` with `repetition_unit`, `repetition_count`
+  and `repetition_in`. 24 CSV plan rows, even 24 identical ones, do not
+  trigger it (tested).
+- **Thinking budget**: reasoning deltas are counted while no answer text
+  has arrived; past `thinking_budget` the stream stops with
+  `finish_reason: thinking_budget` and `thinking_deltas`. The count is
+  approximate (mlx_lm.server sends about one token per delta). It fails
+  fast: the thinking is kept, no answer is salvaged.
+- A guard stop is not retried, and the server's usage chunk never arrives,
+  so such runs have no token counts; their timings are still recorded.
+- **Settings**: `thinking_budget` and `loop_repeats` (non-negative
+  integers) are MITSS-side and never sent; `repetition_penalty` (at least
+  1) and `frequency_penalty` are sent like `presence_penalty`. A streamed
+  run's settings snapshot now also records the effective `loop_repeats`
+  (40 by default) and `thinking_budget` when set, because a guard can
+  change how a run ends. That changed two existing tests' expected
+  snapshots (`test_llm` stream accumulation, `test_team` defaults), whose
+  own comment says defaults are recorded as facts.
+- **Matrix**: `repetition` and `thinking_budget` count as truncated. The
+  count line names reasons when any is not the cap, e.g.
+  `truncated 2 (length 1, repetition 1)`; cap-only lines read as before.
+- **Front end**: `settings.js` only. The run panel shows the guard
+  details. The Models form's field list gained the four new settings,
+  because saving that form sends only its fields as the whole settings
+  block and would otherwise erase `thinking_budget` and `loop_repeats`.
+- **Not done: the ask list.** Adding `scripts/patch_mlx_lm.sh` (and
+  `watch_server.sh`) to `.claude/settings.json` was blocked by Claude
+  Code's permission check on editing its own settings. Left for Jake.
+- **Prompt v3 text** is in `docs/runner/lite-comms-plan-v4-v3.txt`, not
+  in the store: no-commas-use-semicolons in place of both double-quote
+  rules (Sections 2 and 3a), a full 25-field NONE AVAILABLE row, Link 16 /
+  SRW / ANW2 bands, and staggered windows and periodicity.
+- **Found in `backend/matrices/validate/thinking-validate.sh` (not edited):**
+  its "already patched" test, `grep -q "mx.eval(self.left_padding"`, also
+  matches the unpatched 0.31.3 file (`BatchRotatingKVCache.extract()` has
+  `mx.eval(self.left_padding, self.offset)` at line 1418), so it would skip
+  the patch. Reported to Jake with a fix.

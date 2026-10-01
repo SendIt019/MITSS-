@@ -65,6 +65,22 @@ def format_flops(value) -> str:
     return f"~{value:.0f} FLOPs"
 
 
+def _stop_detail(usage) -> str:
+    """What a MITSS stream guard saw, after its finish reason.
+
+    `repetition of "N/A," x41 in the answer` /
+    `thinking_budget after ~8001 thinking tokens, no answer`.
+    """
+    reason = usage.get("finish_reason")
+    if reason == "repetition" and usage.get("repetition_unit") is not None:
+        return (f" of {json.dumps(usage['repetition_unit'])}"
+                f" x{usage.get('repetition_count', '?')}"
+                f" in the {usage.get('repetition_in', 'answer')}")
+    if reason == "thinking_budget" and usage.get("thinking_deltas") is not None:
+        return f" after ~{usage['thinking_deltas']} thinking tokens, no answer"
+    return ""
+
+
 def format_usage(usage) -> str:
     """`3664 in / 8000 out tokens  |  83.0 tok/s  |  first token 4.2 s  |
     decode 7.6 tok/s  |  ~1.3 PFLOPs  |  stopped: length`.
@@ -90,7 +106,7 @@ def format_usage(usage) -> str:
     if usage.get("flops_estimate") is not None:
         parts.append(format_flops(usage["flops_estimate"]))
     if usage.get("finish_reason"):
-        parts.append(f"stopped: {usage['finish_reason']}")
+        parts.append(f"stopped: {usage['finish_reason']}{_stop_detail(usage)}")
     if usage.get("model_reported"):
         parts.append(f"server said: {usage['model_reported']}")
     return "  |  ".join(parts)

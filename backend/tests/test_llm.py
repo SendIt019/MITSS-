@@ -635,8 +635,11 @@ class Streaming(unittest.TestCase):
         self.assertEqual(body["stream_options"], {"include_usage": True})
         # Transport fields are not generation settings; the snapshot a run
         # keeps is unchanged in shape.
+        # The loop guard is on by default (40), so its limit is part of the
+        # snapshot (2026-10-01, thinking fix).
         self.assertEqual(completion.settings,
-                         {"temperature": 0, "max_tokens": 1024, "timeout": 120.0})
+                         {"temperature": 0, "max_tokens": 1024, "timeout": 120.0,
+                          "loop_repeats": 40})
 
     def test_idle_timeout_measures_the_gap_not_the_total(self):
         # Six chunks 0.3 s apart take ~1.8 s in total - far past a 0.6 s

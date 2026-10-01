@@ -382,10 +382,10 @@ class TeamApi(unittest.TestCase):
             run = self.client.post("/api/generate", json={
                 "prompt_id": prompt["id"], "model_id": "team-7b",
             }).json()
-        # Defaults are still recorded - temperature 0 and the default token
-        # cap are facts, not absences.
+        # Defaults are still recorded - temperature 0, the default token
+        # cap and the default loop limit are facts, not absences.
         self.assertEqual(run["settings"], {"temperature": 0, "max_tokens": 1024,
-                                           "timeout": 120.0})
+                                           "timeout": 120.0, "loop_repeats": 40})
         pasted = self.client.post("/api/runs", json={
             "prompt_id": prompt["id"], "model": "hand", "output": "o",
         }).json()
