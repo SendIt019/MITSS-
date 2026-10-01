@@ -1606,3 +1606,12 @@ This changes one existing test, `test_team`'s
 text - still holds and is still asserted (no token counts, no rate); it now
 also asserts the measured keys are present as nulls. New test: a stream
 with no usage chunk keeps its first-token time and parameter count.
+
+## 2026-10-01T13:03:26-05:00 — Run metrics review round 2: missing token counts are not zeros
+
+Codex (`docs/runner/reviews/metrics-round-2.md`, approve with fixes, one
+minor): `summary.txt` summed missing token counts as 0, so a model whose
+runs reported none showed `0 in / 0 out tokens`. Fixed: token totals cover
+runs that reported both counts; with none the summary says `tokens n/a`,
+and a partial total says how many runs it leaves out, the same way the
+FLOPs total already did. Tests cover none, partial and complete.

@@ -194,6 +194,15 @@ class SummaryMetrics(_Base):
         self.assertIn("    metrics: n/a",
                       rm.status_lines(self.only_run_id(), root=self.root))
 
+    def test_token_totals_never_count_a_missing_count_as_zero(self):
+        new_style = {"flops_method": "kaplan2020-v1", "prompt_tokens": 100,
+                     "completion_tokens": 10}
+        bare = {"flops_method": "kaplan2020-v1; not estimated: ..."}
+        self.assertIn("· tokens n/a ·", rm.metrics_line([bare, bare]))
+        self.assertIn("· 200 in / 20 out tokens (1 run(s) without token counts) ·",
+                      rm.metrics_line([new_style, bare, new_style]))
+        self.assertIn("· 100 in / 10 out tokens ·", rm.metrics_line([new_style]))
+
     def test_a_matrix_of_old_style_runs_shows_n_a_everywhere(self):
         self.start(FakeModel(self.root))
         self.assertEqual(self.summary().count("    metrics: n/a"), 3)

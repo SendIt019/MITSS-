@@ -931,6 +931,19 @@ def _numbers(usages: list[dict[str, Any]], key: str) -> list[float]:
             if isinstance(u.get(key), (int, float)) and not isinstance(u.get(key), bool)]
 
 
+def _tokens_part(usages: list[dict[str, Any]]) -> str:
+    """Total tokens in and out over runs that reported both counts. A total
+    that leaves runs out says how many; none reported reads n/a, not 0."""
+    counted = [u for u in usages
+               if _numbers([u], "prompt_tokens") and _numbers([u], "completion_tokens")]
+    if not counted:
+        return "tokens n/a"
+    missing = len(usages) - len(counted)
+    return (f"{sum(_numbers(counted, 'prompt_tokens')):.0f} in / "
+            f"{sum(_numbers(counted, 'completion_tokens')):.0f} out tokens"
+            + (f" ({missing} run(s) without token counts)" if missing else ""))
+
+
 def metrics_line(usages: list[dict[str, Any]]) -> str:
     """Median time to first token and decode speed, total tokens and total
     estimated FLOPs, over runs that carry the new keys."""
@@ -944,8 +957,7 @@ def metrics_line(usages: list[dict[str, Any]]) -> str:
          if first else "first token median n/a"),
         (f"decode median {statistics.median(decode):.1f} tok/s"
          if decode else "decode median n/a"),
-        (f"{sum(_numbers(usages, 'prompt_tokens')):.0f} in / "
-         f"{sum(_numbers(usages, 'completion_tokens')):.0f} out tokens"),
+        _tokens_part(usages),
     ]
     if flops:
         missing = len(usages) - len(flops)
