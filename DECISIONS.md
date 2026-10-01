@@ -1615,3 +1615,13 @@ runs reported none showed `0 in / 0 out tokens`. Fixed: token totals cover
 runs that reported both counts; with none the summary says `tokens n/a`,
 and a partial total says how many runs it leaves out, the same way the
 FLOPs total already did. Tests cover none, partial and complete.
+
+## 2026-10-01T13:04:52-05:00 — Run metrics review round 3: approved, no findings
+
+Codex approved at `424ce71` with no findings
+(`docs/runner/reviews/metrics-round-3.md`). Three rounds: one major
+(metric keys on every generated run) and one minor (missing token counts
+read n/a) fixed, nothing declined. Codex's sandbox could not run the full
+backend suite (temporary-directory restriction); every gate was run outside
+it before each commit and passed. Not yet checked against a live model; the
+command is in the step report for Jake.
