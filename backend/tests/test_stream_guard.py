@@ -69,7 +69,8 @@ class FindLoop(unittest.TestCase):
         self.assertEqual(len(unit), 60)
         self.assertEqual(find_loop(unit * 40, 40), (unit, 40))
 
-    def test_zero_or_one_turns_it_off(self):
+    def test_zero_turns_it_off(self):
+        # 1 is refused as a setting (Settings below); 0 is the off switch.
         self.assertIsNone(find_loop("a" * 1000, 0))
         self.assertIsNone(StreamWatch(loop_repeats=0).answer_loop.add("a" * 1000))
 
@@ -80,7 +81,8 @@ class Settings(unittest.TestCase):
                                     "repetition_penalty": 1.1, "frequency_penalty": -0.5})
         self.assertEqual(clean["loop_repeats"], 0)
         for bad in ({"thinking_budget": -1}, {"thinking_budget": 1.5},
-                    {"loop_repeats": "forty"}, {"repetition_penalty": 0.9},
+                    {"loop_repeats": "forty"}, {"loop_repeats": 1},
+                    {"repetition_penalty": 0.9},
                     {"frequency_penalty": float("nan")}):
             with self.assertRaises(LLMConfigError, msg=bad):
                 normalize_settings(bad)

@@ -285,6 +285,9 @@ def normalize_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
             raise LLMConfigError(f"{name} must be at least {low}, got {value!r}")
         if high is not None and value > high:
             raise LLMConfigError(f"{name} must be at most {high}, got {value!r}")
+        if name == "loop_repeats" and value == 1:
+            # Everything "repeats once", so 1 cannot mean anything useful.
+            raise LLMConfigError("loop_repeats must be 0 (off) or at least 2, got 1")
         clean[name] = value
     return clean
 

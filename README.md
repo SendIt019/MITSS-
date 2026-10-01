@@ -337,7 +337,7 @@ Two MITSS-side guards also end a reply early, and count as truncated too:
   least 200 characters) in the answer or in the thinking stops the stream.
   The run keeps everything received and records `repetition_unit`,
   `repetition_count` and `repetition_in` (answer or thinking) in `usage`. A
-  registration's `loop_repeats: 0` turns it off.
+  registration's `loop_repeats: 0` turns it off (1 is refused).
 - **Thinking budget** (`finish_reason: thinking_budget`). With a
   registration's `thinking_budget` set, a model that streams more than that
   many reasoning deltas (about one token each) before any answer text is

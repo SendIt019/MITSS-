@@ -1717,3 +1717,13 @@ Codex (`docs/runner/reviews/thinking-round-1.md`, request changes):
   editing its own settings, so the lines are in the step report for Jake.
 - The first attempt at this review hung: `codex exec` run in the background
   waited on stdin. Reviews now run with `< /dev/null`.
+
+## 2026-10-01T16:42:22-05:00 — Thinking fix review round 2: loop_repeats 1 is refused
+
+Codex (`docs/runner/reviews/thinking-round-2.md`, approve with fixes):
+
+- **Minor, fixed.** `loop_repeats: 1` passed validation but switched the
+  detector off. Honouring it would flag any text at all, so it is refused:
+  `loop_repeats` is 0 (off) or at least 2. Test updated.
+- **Minor, again: the `.claude/settings.json` ask rules.** Still blocked for
+  Claude Code; left for Jake, lines in the step report.
