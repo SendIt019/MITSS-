@@ -481,7 +481,18 @@ class TeamApi(unittest.TestCase):
             run = self.client.post("/api/generate", json={
                 "prompt_id": prompt["id"], "model_id": "team-7b",
             }).json()
-        self.assertIsNone(run["usage"])
+        # No token count or rate is inferred from the text. Since the run
+        # metrics (2026-10-01) the measured keys are still recorded, as nulls
+        # here: a non-streamed reply has no timings, and the stub folder's
+        # config.json names no architecture.
+        usage = run["usage"]
+        for key in ("prompt_tokens", "completion_tokens", "tokens_per_second",
+                    "finish_reason"):
+            self.assertNotIn(key, usage)
+        for key in ("time_to_first_token_ms", "decode_tokens_per_second",
+                    "active_params", "flops_estimate"):
+            self.assertIsNone(usage[key], key)
+        self.assertIn("not estimated", usage["flops_method"])
         pasted = self.client.post("/api/runs", json={
             "prompt_id": prompt["id"], "model": "hand", "output": "o",
         }).json()

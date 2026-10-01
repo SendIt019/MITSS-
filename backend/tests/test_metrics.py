@@ -263,6 +263,23 @@ class RecordedThroughTheService(unittest.TestCase):
         self.assertRegex(transcript, r"\|  first token 0\.\d s  \|  decode [\d.]+ tok/s"
                                      r"  \|  ~176256 FLOPs  \|  stopped: stop")
 
+    def test_a_stream_without_usage_still_records_the_measured_keys(self):
+        # No usage chunk: the timings and the parameter count are measured
+        # here, so they are kept; the estimate needs token counts, so it is
+        # null with the reason.
+        SCRIPT["attempts"] = [[(0.2, _delta(content="hi")),
+                               (0.1, _delta(content=" there")),
+                               (0, _delta(content="", finish="stop")), (0, DONE)]]
+        with StreamServer() as url:
+            usage = self.record(url)["usage"]
+        self.assertNotIn("completion_tokens", usage)
+        self.assertAlmostEqual(usage["time_to_first_token_ms"] / 1000, 0.2,
+                               delta=self.TOLERANCE)
+        self.assertIsNone(usage["decode_tokens_per_second"])
+        self.assertEqual(usage["active_params"], 1312)
+        self.assertIsNone(usage["flops_estimate"])
+        self.assertIn("did not report both token counts", usage["flops_method"])
+
     def test_a_remote_endpoint_records_null_flops_with_the_reason(self):
         # The stub is on 127.0.0.1; treating it as remote stands in for a
         # teammate's endpoint, whose model folder this machine cannot see.

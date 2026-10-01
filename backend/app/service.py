@@ -437,14 +437,14 @@ def _with_metrics(usage: dict[str, Any] | None,
                   completion: Completion) -> dict[str, Any] | None:
     """Add the timing and compute keys (mitss.metrics) after tokens_per_second.
 
-    Only when the server reported usage at all: a run with nothing reported
-    stays null rather than gaining a block of nulls. tokens_per_second is
-    left exactly as it was - the runner's time estimate and older runs
+    Every generated run gets them, even when the server reported nothing:
+    the stream timings and the parameter count are measured here, not
+    reported, and a number that cannot be had is null with its reason in
+    flops_method. Token counts are still never invented. tokens_per_second
+    is left exactly as it was - the runner's time estimate and older runs
     depend on its meaning.
     """
-    if not usage:
-        return usage
-    enriched = dict(usage)
+    enriched = dict(usage or {})
     enriched.update(run_metrics(usage, completion.timing,
                                 completion.model_folder or None))
     return enriched

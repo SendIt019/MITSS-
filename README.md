@@ -348,7 +348,7 @@ matrix.
 
 ### Timing and compute metrics
 
-Every run recorded from 2026-10-01 whose server reports usage also carries,
+Every run generated through a model endpoint from 2026-10-01 carries,
 in `usage`: `time_to_first_token_ms` (request sent to the first text,
 thinking included - mostly prompt processing on a local model),
 `time_to_first_answer_ms`, `prompt_tokens_per_second`,

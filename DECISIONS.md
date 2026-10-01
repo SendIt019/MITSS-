@@ -1588,3 +1588,21 @@ reports usage gains seven keys in `usage`: `time_to_first_token_ms`,
 - The task's "front-end change" (the run panel line in `settings.js`) is
   the one exception to the runner rules' "no front-end changes in v1",
   because Jake's task asks for it.
+
+## 2026-10-01T12:59:13-05:00 — Run metrics review round 1: the keys go on every generated run
+
+Codex (`docs/runner/reviews/metrics-round-1.md`, request changes, one
+major): a run whose server reported no usage at all got none of the new
+keys, but the task says every new run gets them. Fixed: `_with_metrics`
+now always adds the seven keys to a generated run. Timings and
+`active_params` are measured here, so they are kept; a FLOPs estimate
+needs both token counts, so without them it is null with the reason in
+`flops_method`. Token counts and `tokens_per_second` are still never
+inferred. Pasted runs still have `usage: null`.
+
+This changes one existing test, `test_team`'s
+`test_a_run_with_no_reported_usage_stores_null_not_a_guess`, which asserted
+`usage` was null for such a run. Its point - no number guessed from the
+text - still holds and is still asserted (no token counts, no rate); it now
+also asserts the measured keys are present as nulls. New test: a stream
+with no usage chunk keeps its first-token time and parameter count.
