@@ -1727,3 +1727,12 @@ Codex (`docs/runner/reviews/thinking-round-2.md`, approve with fixes):
   `loop_repeats` is 0 (off) or at least 2. Test updated.
 - **Minor, again: the `.claude/settings.json` ask rules.** Still blocked for
   Claude Code; left for Jake, lines in the step report.
+
+## 2026-10-01T16:43:45-05:00 — Thinking fix review round 3: approve with fixes, one item left for Jake
+
+Codex (`docs/runner/reviews/thinking-round-3.md`) approved with fixes at
+`07c9106`. Its only finding is the missing `.claude/settings.json` ask
+rules for `scripts/patch_mlx_lm.sh`, which Claude Code cannot add (its
+permission check blocks edits to its own settings). Three rounds: one major
+and one minor fixed, the settings item left for Jake. Codex's sandbox could
+not run the backend suite; every gate was run outside it before each commit.
