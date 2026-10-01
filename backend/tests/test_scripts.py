@@ -100,6 +100,27 @@ class PatchScript(unittest.TestCase):
         self.assertFalse(os.path.exists(self.cache + ".orig-mitss"))
         self.assertIn("nothing to undo", self.run_patch("--undo").stdout)
 
+    def test_undo_after_an_upgrade_leaves_the_new_file_alone(self):
+        self.run_patch()
+        upgraded = CACHE_PY.replace("def make_mask", "def new_in_0_32")
+        with open(self.cache, "w", encoding="utf-8") as handle:
+            handle.write(upgraded)            # pip replaced cache.py
+        self.version("0.32.0")
+        result = self.run_patch("--undo")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("refusing to undo: mlx-lm is now 0.32.0", result.stderr)
+        self.assertEqual(self.text(), upgraded)
+        self.assertTrue(os.path.exists(self.cache + ".orig-mitss"))
+
+    def test_undo_after_a_same_version_reinstall_leaves_it_alone(self):
+        self.run_patch()
+        with open(self.cache, "w", encoding="utf-8") as handle:
+            handle.write(CACHE_PY + "# reinstalled\n")
+        result = self.run_patch("--undo")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("is not the patched file", result.stderr)
+        self.assertEqual(self.text(), CACHE_PY + "# reinstalled\n")
+
     def test_another_version_is_refused_untouched(self):
         self.version("0.32.0")
         result = self.run_patch()

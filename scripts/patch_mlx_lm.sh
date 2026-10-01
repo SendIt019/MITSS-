@@ -44,17 +44,6 @@ fi
 CACHE="$PACKAGE/models/cache.py"
 BACKUP="$CACHE.orig-mitss"
 
-if [ "$UNDO" = 1 ]; then
-  if [ ! -f "$BACKUP" ]; then
-    echo "nothing to undo: no backup at $BACKUP"
-    exit 0
-  fi
-  cp -p "$BACKUP" "$CACHE"
-  rm -f "$BACKUP"
-  echo "restored $CACHE from its backup; mlx-lm is unpatched"
-  exit 0
-fi
-
 # The version comes from the installed package's metadata, not an import.
 VERSION=""
 for meta in "$(dirname "$PACKAGE")"/mlx_lm-*.dist-info/METADATA; do
@@ -62,6 +51,28 @@ for meta in "$(dirname "$PACKAGE")"/mlx_lm-*.dist-info/METADATA; do
   VERSION="$(sed -n 's/^Version: *//p' "$meta" | head -1)"
   break
 done
+
+if [ "$UNDO" = 1 ]; then
+  if [ ! -f "$BACKUP" ]; then
+    echo "nothing to undo: no backup at $BACKUP"
+    exit 0
+  fi
+  # Restore only over the file this script patched. After an upgrade or a
+  # reinstall the backup is an old cache.py and would replace the new one.
+  if [ "$VERSION" != "$WANT_VERSION" ]; then
+    echo "refusing to undo: mlx-lm is now ${VERSION:-unknown}, but the backup is $WANT_VERSION's cache.py." >&2
+    echo "The upgrade already replaced the patched file. Nothing restored; delete $BACKUP once checked." >&2
+    exit 1
+  fi
+  if ! grep -qF "$MARKER" "$CACHE"; then
+    echo "refusing to undo: $CACHE is not the patched file (reinstalled?). Nothing restored; delete $BACKUP once checked." >&2
+    exit 1
+  fi
+  cp -p "$BACKUP" "$CACHE"
+  rm -f "$BACKUP"
+  echo "restored $CACHE from its backup; mlx-lm is unpatched"
+  exit 0
+fi
 if [ "$VERSION" != "$WANT_VERSION" ]; then
   echo "refusing: mlx-lm is ${VERSION:-unknown} at $PACKAGE; this patch is for $WANT_VERSION only." >&2
   echo "A newer release may already fix issue #1332 - check before patching anything." >&2

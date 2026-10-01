@@ -1701,3 +1701,19 @@ from `feat/run-metrics`.
   matches the unpatched 0.31.3 file (`BatchRotatingKVCache.extract()` has
   `mx.eval(self.left_padding, self.offset)` at line 1418), so it would skip
   the patch. Reported to Jake with a fix.
+
+## 2026-10-01T16:38:18-05:00 — Thinking fix review round 1: --undo checks before it restores
+
+Codex (`docs/runner/reviews/thinking-round-1.md`, request changes):
+
+- **Major, fixed.** `patch_mlx_lm.sh --undo` restored the backup without
+  checking anything, so after an mlx-lm upgrade it would have put 0.31.3's
+  cache.py over the new release. Undo now restores only when the installed
+  version is 0.31.3 and cache.py carries the patch marker; otherwise it
+  refuses, changes nothing and keeps the backup. Tests: undo after an
+  upgrade, and after a same-version reinstall.
+- **Minor, not fixed by Claude Code: the ask rules for the patch script in
+  `.claude/settings.json`.** Claude Code's permission check blocks it from
+  editing its own settings, so the lines are in the step report for Jake.
+- The first attempt at this review hung: `codex exec` run in the background
+  waited on stdin. Reviews now run with `< /dev/null`.
